@@ -59,7 +59,7 @@ CREATE TABLE lecture (
     lecture_type TEXT,
     order_number INT,
     duration_minutes INT DEFAULT 90,
-    equipment_req VARCHAR(200),
+    computer_type VARCHAR(200),
     tags TEXT[]
 );
 
@@ -88,6 +88,7 @@ CREATE TABLE student (
     last_name VARCHAR(100) NOT NULL,
     patronymic VARCHAR(100),
     email VARCHAR(255),
+    phone VARCHAR(50),
     student_card_number VARCHAR(20),
     enrollment_date DATE,
     status VARCHAR(50) DEFAULT 'active'
@@ -111,6 +112,7 @@ CREATE TABLE attendance (
     schedule_id UUID NOT NULL,
     student_id UUID NOT NULL,
     week_start_date DATE NOT NULL,
+    is_present BOOLEAN NOT NULL DEFAULT TRUE,
     marked_at TIMESTAMP DEFAULT NOW(),
     PRIMARY KEY (id, week_start_date)
 ) PARTITION BY RANGE (week_start_date);
@@ -131,6 +133,7 @@ CREATE INDEX idx_attendance_schedule ON attendance (schedule_id);
 CREATE INDEX idx_attendance_student ON attendance (student_id);
 CREATE INDEX idx_attendance_student_week ON attendance (student_id, week_start_date);
 CREATE INDEX idx_attendance_schedule_student ON attendance (schedule_id, student_id);
+CREATE INDEX idx_attendance_present ON attendance (is_present);
 
 CREATE INDEX idx_schedule_lecture ON schedule (lecture_id);
 CREATE INDEX idx_schedule_group ON schedule (group_id);

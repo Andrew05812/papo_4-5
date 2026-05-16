@@ -158,8 +158,8 @@ COURSE_NAMES = [
     "Правоведение", "Экономика", "Менеджмент",
 ]
 
-# Требования к оборудованию аудиторий
-EQUIPMENT_REQUIREMENTS = [
+# Типы компьютерного обеспечения
+COMPUTER_TYPES = [
     "проектор", "компьютерный класс", "интерактивная доска", "лабораторное оборудование",
     "микроконтроллеры", "осциллограф", "мультимедийный проектор", "документ-камера",
     "система видеоконференцсвязи", "VR-оборудование", "серверное оборудование",
@@ -392,14 +392,14 @@ def generate_data(student_count=1000):
                     tags.append(random.choice(SPECIAL_TAGS))
                 if random.random() < 0.5:
                     tags.append(course_name.lower().replace(" ", "_"))
-                eq = random.choice(EQUIPMENT_REQUIREMENTS) if random.random() < 0.4 else None
+                eq = random.choice(COMPUTER_TYPES) if random.random() < 0.4 else None
                 lecture_data.append((lid, cid, title, annotation, ltype, order_number, dur, eq, tags))
 
         # --- Вставка лекций lecture (batch по 500, ~1000 строк, FK → lecture_course) ---
         batch_size = 500
         for i in range(0, len(lecture_data), batch_size):
             execute_values(cur,
-                'INSERT INTO lecture (id, course_id, title, annotation, lecture_type, order_number, duration_minutes, equipment_req, tags) VALUES %s',
+                'INSERT INTO lecture (id, course_id, title, annotation, lecture_type, order_number, duration_minutes, computer_type, tags) VALUES %s',
                 lecture_data[i:i+batch_size]
             )
 
@@ -459,14 +459,15 @@ def generate_data(student_count=1000):
                 ln = random.choice(LAST_NAMES_M)
                 pat = random.choice(PATRONYMICS_M)
             email = f"{ln.lower()}.{fn.lower()}@mirea.ru"
+            phone = f"+7-9{random.randint(100,999)}-{random.randint(100,999)}-{random.randint(10,99)}"
             card = f"М{random.randint(100000, 999999)}"
             enroll_date = date(random.choice([2022, 2023, 2024, 2025]), 9, 1)
             status = random.choices(["active", "academic_leave", "expelled"], weights=[0.9, 0.05, 0.05])[0]
-            student_data.append((sid, gid, fn, ln, pat, email, card, enroll_date, status))
+            student_data.append((sid, gid, fn, ln, pat, email, phone, card, enroll_date, status))
 
         for i in range(0, len(student_data), batch_size):
             execute_values(cur,
-                "INSERT INTO student (id, group_id, first_name, last_name, patronymic, email, student_card_number, enrollment_date, status) VALUES %s",
+                "INSERT INTO student (id, group_id, first_name, last_name, patronymic, email, phone, student_card_number, enrollment_date, status) VALUES %s",
                 student_data[i:i+batch_size]
             )
 
@@ -532,8 +533,8 @@ def generate_data(student_count=1000):
             )
 
         # --- Вставка посещаемости attendance (партиционированная таблица, batch по 500;
-        #     каждая запись: студент присутствовал на занятии, FK → schedule, student) ---
-        # Генерация посещаемости (случайная явка 50-95% студентов на каждое занятие)
+        #     каждая запись: студент присутствовал/отсутствовал на занятии, FK → schedule, student) ---
+        # Генерация посещаемости (для каждого студента в группе создаётся запись с is_present=True/False)
         logger.info("Generating attendance records...")
         cur.execute("SELECT id, group_id, week_start_date FROM schedule")
         schedule_info = cur.fetchall()
@@ -554,15 +555,16 @@ def generate_data(student_count=1000):
                 continue
             attendance_rate = random.uniform(0.5, 0.95)
             num_attending = max(1, int(len(students_in_group) * attendance_rate))
-            attending = random.sample(students_in_group, min(num_attending, len(students_in_group)))
+            attending = set(random.sample(students_in_group, min(num_attending, len(students_in_group))))
 
-            for sid in attending:
+            for sid in students_in_group:
+                is_present_val = sid in attending
                 marked = datetime(ws.year, ws.month, ws.day, random.randint(8, 18), random.randint(0, 59))
-                attendance_data.append((str(uuid.uuid4()), sched_id, sid, ws, marked))
+                attendance_data.append((str(uuid.uuid4()), sched_id, sid, ws, is_present_val, marked))
 
         for i in range(0, len(attendance_data), batch_size):
             execute_values(cur,
-                "INSERT INTO attendance (id, schedule_id, student_id, week_start_date, marked_at) VALUES %s",
+                "INSERT INTO attendance (id, schedule_id, student_id, week_start_date, is_present, marked_at) VALUES %s",
                 attendance_data[i:i+batch_size]
             )
 
@@ -646,7 +648,7 @@ def populate_elasticsearch(course_ids, lecture_ids, lecture_material_ids):
                 "content_text": {"type": "text", "analyzer": "russian_custom"},
                 "lecture_type": {"type": "keyword"},
                 "tags": {"type": "keyword"},
-                "equipment_req": {"type": "text", "analyzer": "russian_custom"},
+                "computer_type": {"type": "text", "analyzer": "russian_custom"},
                 "semester": {"type": "integer"}
             }
         }
@@ -657,7 +659,7 @@ def populate_elasticsearch(course_ids, lecture_ids, lecture_material_ids):
     cur = pg.cursor()
     cur.execute("""
         SELECT l.id, l.course_id, lc.name as course_name, l.title, l.annotation,
-               l.lecture_type, l.tags, l.equipment_req,
+               l.lecture_type, l.tags, l.computer_type,
                COALESCE(string_agg(lm.content_text, ' '), '') as content_text,
                lc.semester
         FROM lecture l
@@ -681,7 +683,7 @@ def populate_elasticsearch(course_ids, lecture_ids, lecture_material_ids):
             "annotation": row[4] or "",
             "lecture_type": row[5],
             "tags": tags,
-            "equipment_req": row[7] or "",
+            "computer_type": row[7] or "",
             "content_text": row[8] or "",
             "semester": row[9]
         }
@@ -728,24 +730,24 @@ def populate_neo4j(course_ids, lecture_ids, group_ids, student_ids, schedule_ids
 
     with driver.session() as session:
         # Создание узлов Student (все свойства для замены PG-запросов), батч 500
-        cur.execute("SELECT id, first_name, last_name, patronymic, student_card_number, email, status, enrollment_date, group_id FROM student")
+        cur.execute("SELECT id, first_name, last_name, patronymic, student_card_number, email, phone, status, enrollment_date, group_id FROM student")
         students = cur.fetchall()
         batch = []
         for s in students:
             batch.append({
                 "id": str(s[0]), "name": f"{s[1]} {s[2]} {s[3]}", "card_number": s[4],
                 "first_name": s[1], "last_name": s[2], "patronymic": s[3] or "",
-                "email": s[5], "status": s[6], "enrollment_date": str(s[7]), "group_id": str(s[8])
+                "email": s[5], "phone": s[6], "status": s[7], "enrollment_date": str(s[8]), "group_id": str(s[9])
             })
             if len(batch) >= 500:
                 session.run(
-                    "UNWIND $batch AS row CREATE (s:Student {id: row.id, name: row.name, card_number: row.card_number, first_name: row.first_name, last_name: row.last_name, patronymic: row.patronymic, email: row.email, status: row.status, enrollment_date: row.enrollment_date, group_id: row.group_id})",
+                    "UNWIND $batch AS row CREATE (s:Student {id: row.id, name: row.name, card_number: row.card_number, first_name: row.first_name, last_name: row.last_name, patronymic: row.patronymic, email: row.email, phone: row.phone, status: row.status, enrollment_date: row.enrollment_date, group_id: row.group_id})",
                     batch=batch
                 )
                 batch = []
         if batch:
             session.run(
-                "UNWIND $batch AS row CREATE (s:Student {id: row.id, name: row.name, card_number: row.card_number, first_name: row.first_name, last_name: row.last_name, patronymic: row.patronymic, email: row.email, status: row.status, enrollment_date: row.enrollment_date, group_id: row.group_id})",
+                "UNWIND $batch AS row CREATE (s:Student {id: row.id, name: row.name, card_number: row.card_number, first_name: row.first_name, last_name: row.last_name, patronymic: row.patronymic, email: row.email, phone: row.phone, status: row.status, enrollment_date: row.enrollment_date, group_id: row.group_id})",
                 batch=batch
             )
 
@@ -769,17 +771,17 @@ def populate_neo4j(course_ids, lecture_ids, group_ids, student_ids, schedule_ids
             )
 
         # Создание узлов Lecture (название, тип, оборудование, теги), батч 500
-        cur.execute("SELECT id, title, lecture_type, equipment_req, tags FROM lecture")
+        cur.execute("SELECT id, title, lecture_type, computer_type, tags FROM lecture")
         lectures = cur.fetchall()
         batch = []
         for l in lectures:
             tags = l[4] if l[4] else []
             if isinstance(tags, str):
                 tags = [t.strip() for t in tags.split(",") if t.strip()]
-            batch.append({"id": str(l[0]), "title": l[1], "type": l[2] or "", "equipment_req": l[3] or "", "tags": tags})
+            batch.append({"id": str(l[0]), "title": l[1], "type": l[2] or "", "computer_type": l[3] or "", "tags": tags})
         for i in range(0, len(batch), 500):
             session.run(
-                "UNWIND $batch AS row CREATE (l:Lecture {id: row.id, title: row.title, type: row.type, equipment_req: row.equipment_req, tags: row.tags})",
+                "UNWIND $batch AS row CREATE (l:Lecture {id: row.id, title: row.title, type: row.type, computer_type: row.computer_type, tags: row.tags})",
                 batch=batch[i:i+500]
             )
 
@@ -884,10 +886,11 @@ def populate_redis(student_ids, student_data):
                 "last_name": d[3],
                 "patronymic": d[4] or "",
                 "email": d[5],
-                "student_card_number": d[6],
+                "phone": d[6],
+                "student_card_number": d[7],
                 "group_id": d[1],
-                "status": d[8],
-                "enrollment_date": str(d[7])
+                "status": d[9],
+                "enrollment_date": str(d[8])
             })
             pipe.expire(key, 7200)
             if i % 500 == 0:

@@ -92,7 +92,7 @@ curl -X POST http://localhost:8000/auth/token \
 5. **nginx проверяет клиентский сертификат** — `ssl_verify_client on`, если сертификат не подписан CA → 400
 6. **nginx проксирует HTTP-запрос** к `http://lab1:8001/query`
 7. **Lab1 проверяет service JWT** — `verify_service_token()`, если `type != service` → 403
-8. **Lab1 выполняет запрос** к своим БД (ES → Neo4j → Redis)
+8. **Lab1 выполняет запрос** к своим БД (ES → Neo4j → PostgreSQL → Redis)
 9. **Ответ идёт обратно**: Lab1 → nginx → шлюз → пользователь
 
 ---
@@ -199,13 +199,15 @@ docker compose logs nginx --tail 5
 
 **Рассказывать так:**
 
-«Запрос идёт по трём хранилищам: Elasticsearch → Neo4j → Redis.
+«Запрос идёт по четырём хранилищам: Elasticsearch → Neo4j → PostgreSQL → Redis.
 
 **Шаг 1 — Elasticsearch.** Мы ищем термин в индексе "lectures". Используем полнотекстовый поиск BM25 с fuzziness AUTO и кастомным анализатором russian_custom (standard tokenizer → lowercase → стоп-слова → стеммер). Это быстрее и точнее чем LIKE в PostgreSQL. Получаем список lecture_id.
 
-**Шаг 2 — Neo4j.** По этим lecture_id обходим граф: находим Schedule через PART_OF для лекций в заданном периоде, затем через SHOULD_ATTEND определяем сколько занятий студент должен был посетить (total_scheduled), а через ATTENDED — сколько фактически посетил (total_attended). Вычисляем attendance_pct = total_attended / total_scheduled * 100, сортируем ASC и берём LIMIT 10. Это заменяет CTE MATERIALIZED в PostgreSQL — граф естественным образом хранит связи студент↔расписание↔лекция.
+**Шаг 2 — Neo4j.** По этим lecture_id обходим граф: находим Schedule через PART_OF для лекций в заданном периоде, затем через SHOULD_ATTEND — получаем пары (student_id, schedule_id). Neo4j не хранит данные о фактическом посещении.
 
-**Шаг 3 — Redis.** Для топ-10 студентов проверяем кэш — pipeline HGETALL student:{uuid}. При промахе заполняем из данных Neo4j. TTL 2 часа — кэш автоматически очищается.»
+**Шаг 3 — PostgreSQL.** По парам из Neo4j считаем посещаемость: total_scheduled = COUNT пар, total_attended = COUNT WHERE is_present = TRUE. attendance_pct = total_attended / total_scheduled * 100. Таблица attendance партиционирована — partition pruning. ORDER BY ASC LIMIT 10.
+
+**Шаг 4 — Redis.** Для топ-10 студентов проверяем кэш — pipeline HGETALL student:{uuid}. При промахе заполняем из данных PostgreSQL. TTL 2 часа — кэш автоматически очищается.»
 
 ### ЛР2 — подробно
 
@@ -215,7 +217,7 @@ docker compose logs nginx --tail 5
 
 «Запрос идёт по четырём хранилищам: PostgreSQL → Neo4j → Redis → MongoDB.
 
-**Шаг 1 — PostgreSQL.** Фильтруем лекции по семестру, типу "лекция" и требованиям к оборудованию. Находим расписание за указанный год. Считаем количество студентов в каждой группе.
+**Шаг 1 — PostgreSQL.** Фильтруем лекции по семестру, типу "лекция" и требованиям к компьютерному обеспечению. Находим расписание за указанный год. Считаем количество студентов в каждой группе.
 
 **Шаг 2 — Neo4j.** Обходим граф: от найденных лекций через BELONGS_TO к курсам, через PART_OF к расписанию, через CONTAINS к группам. Это сужает множество групп — мы запрашиваем Redis только для групп из расписания, а не для всех групп курса.
 
@@ -261,7 +263,7 @@ docker compose logs nginx --tail 5
 | speciality | id, name(V500), code, degree_level, duration_years | |
 | department_specialities | id, department_id FK, speciality_id FK, is_primary | Junction M:N |
 | lecture_course | id, speciality_id FK, name(V500), description, semester, total/lecture/practice/lab_hours | |
-| lecture | id, course_id FK, title(V500), annotation, lecture_type, **order_number**, duration_minutes, **equipment_req**(V200), **tags**(TEXT[]) | order_number не order; equipment_req + tags для ЛР2/3 |
+| lecture | id, course_id FK, title(V500), annotation, lecture_type, **order_number**, duration_minutes, **computer_type**(V200), **tags**(TEXT[]) | order_number не order; computer_type + tags для ЛР2/3 |
 | lecture_material | id, lecture_id FK, content_type, title, content_text, file_url, metadata(JSONB) | content_text → ES |
 | student_group | id, speciality_id FK, name(V50), enrollment_year, curator | |
 | student | id, group_id FK, first_name, last_name, patronymic, email, student_card_number, enrollment_date, status | |
@@ -272,10 +274,10 @@ docker compose logs nginx --tail 5
 
 | Узел | Свойства |
 |------|----------|
-| Student | id, name, card_number, first_name, last_name, patronymic, email, status, enrollment_date, group_id |
+| Student | id, name, card_number, first_name, last_name, patronymic, email, phone, status, enrollment_date, group_id |
 | StudentGroup | id, name, enrollment_year, curator, speciality_id |
 | Schedule | id, date, time, classroom, week_start_date, teacher_name |
-| Lecture | id, title, type, equipment_req, tags |
+| Lecture | id, title, type, computer_type, tags |
 | LectureCourse | id, name, semester, total_hours, lecture_hours, practice_hours, lab_hours, description, speciality_id |
 
 | Связь | Направление | Описание |
@@ -299,7 +301,7 @@ docker compose logs nginx --tail 5
 
 ### Elasticsearch — индекс "lectures"
 
-- Поля: lecture_id, course_id, course_name, title, annotation, content_text, lecture_type(keyword), tags(keyword), equipment_req, semester
+- Поля: lecture_id, course_id, course_name, title, annotation, content_text, lecture_type(keyword), tags(keyword), computer_type, semester
 - Анализатор `russian_custom`: standard → lowercase → russian_stop → russian_stemmer
 - text-поля с russian_custom (полнотекстовый поиск), keyword-поля для точной фильтрации
 
@@ -318,7 +320,7 @@ docker compose logs nginx --tail 5
 | nginx | 443 | mTLS-прокси: проверяет client cert, проксирует к лабам |
 | generator | 8010 | Заполняет все 5 БД напрямую |
 | api-gateway | 8000 | OAuth2 + mTLS-клиент + проксирование + Web UI |
-| lab1 | 8001 | ЛР1: ES → Neo4j → Redis |
+| lab1 | 8001 | ЛР1: ES → Neo4j → PG → Redis |
 | lab2 | 8002 | ЛР2: PG → Neo4j → Redis → MongoDB |
 | lab3 | 8003 | ЛР3: ES → Neo4j → PG |
 

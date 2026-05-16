@@ -24,7 +24,7 @@ rectangle "Пользователь" as User
 rectangle "1.0\nАутентификация\nOAuth2 (JWT)" as Auth
 rectangle "2.0\nПроверка mTLS\nи проксирование\n(nginx)" as Proxy
 
-rectangle "3.1\nЛР1: Посещаемость\nпо термину\n(ES→Neo4j→Redis)" as Report1
+rectangle "3.1\nЛР1: Посещаемость\nпо термину\n(ES→Neo4j→PG→Redis)" as Report1
 rectangle "3.2\nЛР2: Нагрузка аудиторий\nпо семестру/году\n(PG→Neo4j→Redis→Mongo)" as Report2
 rectangle "3.3\nЛР3: Часы спец. дисциплин\nпо группе\n(ES→Neo4j→PG)" as Report3
 
@@ -37,13 +37,15 @@ rectangle "Elasticsearch" as ES <<datastore>>
 User -right-> Auth : логин/пароль
 Auth -right-> Proxy : service JWT + client cert
 Proxy -down-> Report1 : term, start_date, end_date
-Proxy -down-> Report2 : semester, year, equipment
+Proxy -down-> Report2 : semester, year, computer_type
 Proxy -down-> Report3 : group_name
 
 Report1 -down-> ES : полнотекстовый поиск
 ES -up-> Report1 : lecture_ids
-Report1 -down-> Neo4j : SHOULD_ATTEND + ATTENDED → attendance_pct
-Neo4j -up-> Report1 : top-10 студентов
+Report1 -down-> Neo4j : SHOULD_ATTEND
+Neo4j -up-> Report1 : student_schedule pairs
+Report1 -down-> PG : is_present attendance
+PG -up-> Report1 : attendance_pct
 Report1 -down-> Redis : HGETALL pipeline
 Redis -up-> Report1 : student cache
 
