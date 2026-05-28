@@ -26,6 +26,9 @@ linux-x86-64/
 win32-x86-64/
 module-info.class
 *.jar
+!kafka-connect/redis-cdc-handler.jar
+!kafka-connect/elasticsearch-cdc-handler.jar
+!kafka-connect/mongodb-connector.jar
 *.tar.gz
 *.zip
 data/
