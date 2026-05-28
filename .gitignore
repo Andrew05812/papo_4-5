@@ -16,6 +16,7 @@ venv/
 .DS_Store
 Thumbs.db
 com/
+!**/src/**/com/
 org/
 META-INF/
 darwin/
