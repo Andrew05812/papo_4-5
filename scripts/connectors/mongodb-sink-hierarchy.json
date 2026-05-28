@@ -1,0 +1,15 @@
+{
+  "connector.class": "com.mongodb.kafka.connect.MongoSinkConnector",
+  "connection.uri": "mongodb://mongo:password12345@mongodb:27017",
+  "database": "university",
+  "collection": "hierarchy",
+  "topics": "university.public.university,university.public.institute,university.public.department,university.public.speciality,university.public.department_specialities",
+  "change.data.capture.handler": "com.example.UniversityHierarchyCdcHandler",
+  "document.id.strategy": "com.mongodb.kafka.connect.sink.processor.id.strategy.FullKeyStrategy",
+  "writemodel.strategy": "com.mongodb.kafka.connect.sink.writemodel.strategy.ReplaceOneDefaultStrategy",
+  "tasks.max": "1",
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "true",
+  "value.converter.schemas.enable": "true"
+}

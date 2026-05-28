@@ -1,43 +1,24 @@
 """
 Модуль generator.py — основная логика генератора тестовых данных.
 
-Заполняет 5 хранилищ:
-  • PostgreSQL — 12 таблиц, включая партиционированную таблицу attendance
-  • Elasticsearch — индекс lectures с анализатором russian_custom
-  • Neo4j — 9 типов узлов (Student, StudentGroup, Schedule, Lecture, LectureCourse,
-            University, Institute, Department, Speciality)
-            и 7 типов связей (MEMBER_OF, CONTAINS, PART_OF, BELONGS_TO,
-            SHOULD_ATTEND, ATTENDED, FOR_SPECIALITY)
-  • Redis     — кэш студентов в Hash-ключах student:{uuid} с TTL=2 ч (7200 с)
-  • MongoDB   — вложенный документ иерархии University→Institutes→Departments→Specialities
+Заполняет ТОЛЬКО PostgreSQL (12 таблиц, включая партиционированную таблицу attendance).
+Остальные СУБД (Elasticsearch, Neo4j, Redis, MongoDB) заполняются через CDC pipeline:
+  PostgreSQL → Debezium Source → Kafka → Sink Connectors → 4 БД
+
+ES индекс 'lectures' (BM25, russian_custom анализатор) создаётся Lab1 при старте,
+а НЕ генератором — для соответствия требованию "генератор заполняет только PostgreSQL".
 """
-# psycopg2: драйвер PostgreSQL — master-источник всех сущностей (12 таблиц + partitioned attendance)
 import psycopg2
-# execute_values: batch-вставка строк (по 500) вместо отдельных INSERT — в 10-100 раз быстрее
 from psycopg2.extras import execute_values
-# Elasticsearch + helpers: полнотекстовый индекс lectures (BM25, russian_custom анализатор, bulk-индексация)
-from elasticsearch import Elasticsearch, helpers
-# Neo4j GraphDatabase: граф связей студент↔группа↔расписание↔лекция↔курс (5 узлов, 6 связей)
-from neo4j import GraphDatabase
-# redis: кэш данных студентов (Hash student:{uuid}, TTL=7200с, pipeline-вставка)
-import redis
-# pymongo: MongoClient для вложенного документа иерархии университета (findOne O(1))
-from pymongo import MongoClient
-# bson.ObjectId: работа с MongoDB _id (в текущей генерации используется str(university_id))
-from bson import ObjectId
-# uuid: генерация UUID v4 для всех первичных ключей (совместимость с PostgreSQL UUID-типом)
 import uuid
-# random: стохастическая генерация данных (посещаемость 50-95%, теги 30%, оборудование 40%)
 import random
-# hashlib: зарезервировано для хеширования (в текущей версии не используется)
-import hashlib
 # date, time, datetime, timedelta: работа с датами расписания и посещаемости
 from datetime import date, time, datetime, timedelta
 # Optional: аннотации типов для функций (в текущей версии не используется активно)
 from typing import Optional
 # logging: протоколирование процесса генерации (INFO-уровень)
 import logging
-# os: чтение переменных окружения для конфигурации подключений к 5 БД
+# os: чтение переменных окружения для подключения к PostgreSQL
 import os
 
 logging.basicConfig(level=logging.INFO)
@@ -263,48 +244,22 @@ def get_pg_conn():
     )
 
 
-# Подключение к Elasticsearch (полнотекстовый поиск лекций)
-def get_es():
-    return Elasticsearch(f"http://{os.environ['ES_HOST']}:{os.environ['ES_PORT']}")
-
-
-# Подключение к Neo4j (граф связей студент-группа-расписание-лекция)
-def get_neo4j_driver():
-    return GraphDatabase.driver(
-        os.environ["NEO4J_URI"],
-        auth=(os.environ["NEO4J_USER"], os.environ["NEO4J_PASSWORD"])
-    )
-
-
-# Подключение к Redis (кэш данных студентов, TTL=2ч)
-def get_redis():
-    return redis.Redis(host=os.environ["REDIS_HOST"], port=int(os.environ.get("REDIS_PORT", 6379)), decode_responses=True)
-
-
-# Подключение к MongoDB (вложенный документ иерархии университета)
-def get_mongo():
-    return MongoClient(
-        host=os.environ["MONGO_HOST"],
-        port=int(os.environ.get("MONGO_PORT", 27017)),
-        username=os.environ["MONGO_USER"],
-        password=os.environ["MONGO_PASSWORD"]
-    )
-
-
 def generate_data(student_count=1000):
     """
-    Главная функция генерации. Общий поток:
-    1. Очистка всех хранилищ (clear_all_stores)
+    Главная функция генерации. Поток:
+    1. Очистка PostgreSQL (clear_postgres)
     2. Заполнение PostgreSQL (12 таблиц: university → institute → department →
        speciality → department_specialities → lecture_course → lecture →
        lecture_material → student_group → student → schedule → attendance)
-    3. Заполнение Elasticsearch (индекс lectures из PG)
-    4. Заполнение Neo4j (узлы + связи из PG)
-    5. Заполнение Redis (кэш студентов)
-    6. Заполнение MongoDB (иерархия университета)
+
+    Остальные СУБД (Elasticsearch, Neo4j, Redis, MongoDB) заполняются через CDC pipeline:
+      PostgreSQL → Debezium Source → Kafka → Sink Connectors
+
+    ES индекс 'lectures' для Lab1 создаётся Lab1 при старте (ensure_lectures_index),
+    а НЕ генератором — для соответствия требованию "генератор заполняет только PostgreSQL".
     """
     logger.info(f"Starting data generation: {student_count} students")
-    clear_all_stores()
+    clear_postgres()
 
     random.seed(42)
 
@@ -595,18 +550,7 @@ def generate_data(student_count=1000):
         cur.close()
         pg.close()
 
-    logger.info("Populating Elasticsearch...")
-    populate_elasticsearch(course_ids, lecture_ids, lecture_material_ids)
-
-    logger.info("Populating Neo4j...")
-    populate_neo4j(course_ids, lecture_ids, group_ids, student_ids, schedule_ids,
-                   university_id, institute_ids, department_ids, speciality_ids)
-
-    logger.info("Populating Redis...")
-    populate_redis(student_ids, student_data)
-
-    logger.info("Populating MongoDB...")
-    populate_mongodb(university_id, institute_ids, department_ids, speciality_ids, dept_spec_ids)
+    logger.info("PostgreSQL data committed")
 
     counts = {
         "university": 1,
@@ -627,468 +571,17 @@ def generate_data(student_count=1000):
     return {"status": "success", "counts": counts}
 
 
-def populate_elasticsearch(course_ids, lecture_ids, lecture_material_ids):
+def clear_postgres():
     """
-    Заполнение Elasticsearch: создание индекса lectures с кастомным анализатором
-    russian_custom (standard tokenizer + lowercase + russian_stop + russian_stemmer),
-    затем bulk-индексация документов, собранных из PG (lecture + lecture_course + lecture_material).
+    Очистка PostgreSQL (все таблицы в обратном порядке FK).
+    Остальные СУБД (Elasticsearch, Neo4j, Redis, MongoDB) очищаются автоматически
+    при повторной генерации — CDC pipeline удалит старые данные и запишет новые.
+    ES индекс 'lectures' пересоздаётся Lab1 при старте (ensure_lectures_index).
     """
-    es = get_es()
-
-    if es.indices.exists(index="lectures"):
-        es.indices.delete(index="lectures")
-
-    # Создание индекса с russian_custom анализатором (standard tokenizer + lowercase + russian_stop + russian_stemmer)
-    es.indices.create(index="lectures", body={
-        "settings": {
-            "analysis": {
-                "filter": {
-                    "russian_stop": {"type": "stop", "stopwords": "_russian_"},
-                    "russian_stemmer": {"type": "stemmer", "language": "russian"}
-                },
-                "analyzer": {
-                    "russian_custom": {
-                        "type": "custom",
-                        "tokenizer": "standard",
-                        "filter": ["lowercase", "russian_stop", "russian_stemmer"]
-                    }
-                }
-            }
-        },
-        "mappings": {
-            "properties": {
-                "lecture_id": {"type": "keyword"},
-                "course_id": {"type": "keyword"},
-                "course_name": {"type": "text", "analyzer": "russian_custom"},
-                "title": {"type": "text", "analyzer": "russian_custom"},
-                "annotation": {"type": "text", "analyzer": "russian_custom"},
-                "content_text": {"type": "text", "analyzer": "russian_custom"},
-                "lecture_type": {"type": "keyword"},
-                "tags": {"type": "keyword"},
-                "computer_type": {"type": "text", "analyzer": "russian_custom"},
-                "semester": {"type": "integer"}
-            }
-        }
-    })
-
-    # Выгрузка лекций + материалов из PostgreSQL для индексации
-    pg = get_pg_conn()
-    cur = pg.cursor()
-    cur.execute("""
-        SELECT l.id, l.course_id, lc.name as course_name, l.title, l.annotation,
-               l.lecture_type, l.tags, l.computer_type,
-               COALESCE(string_agg(lm.content_text, ' '), '') as content_text,
-               lc.semester
-        FROM lecture l
-        JOIN lecture_course lc ON l.course_id = lc.id
-        LEFT JOIN lecture_material lm ON l.id = lm.lecture_id
-        GROUP BY l.id, lc.name, lc.semester
-    """)
-
-    actions = []
-    for row in cur.fetchall():
-        tags = row[6]
-        if isinstance(tags, str):
-            tags = [t.strip() for t in tags.split(",") if t.strip()]
-        elif tags is None:
-            tags = []
-        doc = {
-            "lecture_id": str(row[0]),
-            "course_id": str(row[1]),
-            "course_name": row[2],
-            "title": row[3],
-            "annotation": row[4] or "",
-            "lecture_type": row[5],
-            "tags": tags,
-            "computer_type": row[7] or "",
-            "content_text": row[8] or "",
-            "semester": row[9]
-        }
-        # Формирование документов для bulk-индексации
-        actions.append({"_index": "lectures", "_id": str(row[0]), "_source": doc})
-
-    # Bulk-индексация (батчами по 500 документов)
-    if actions:
-        success, errors = helpers.bulk(es, actions, chunk_size=500, raise_on_error=False)
-        if errors:
-            logger.error(f"ES bulk errors: {errors[:3]}")
-        logger.info(f"ES: indexed {success}/{len(actions)} lectures")
-
-    cur.close()
-    pg.close()
-
-
-def populate_neo4j(course_ids, lecture_ids, group_ids, student_ids, schedule_ids,
-                   university_id, institute_ids, department_ids, speciality_ids):
-    """
-    Заполнение Neo4j: 9 типов узлов и 7 типов связей.
-    
-    Узлы:
-      Student, StudentGroup, Schedule, Lecture, LectureCourse,
-      University, Institute, Department, Speciality
-    
-    Связи:
-      MEMBER_OF      — студент → группа
-      CONTAINS       — группа → расписание
-      PART_OF        — расписание → лекция / институт → университет / кафедра → институт / специальность → кафедра
-      BELONGS_TO     — лекция → курс
-      SHOULD_ATTEND  — студент → расписание (должен присутствовать)
-      ATTENDED       — студент → расписание (фактически присутствовал, но без is_present)
-      FOR_SPECIALITY — курс → специальность
-    
-    Иерархия: LectureCourse-[FOR_SPECIALITY]->Speciality-[PART_OF]->Department-[PART_OF]->Institute-[PART_OF]->University
-    
-    Данные читаются из PG, узлы и связи создаются пакетами через UNWIND
-    (по 500 записей) для производительности.
-    """
-    driver = get_neo4j_driver()
-
-    with driver.session() as session:
-        session.run("MATCH (n) DETACH DELETE n")
-
-        # Уникальные ограничения для всех 9 типов узлов (ускоряют MATCH в UNWIND)
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Student) REQUIRE s.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (g:StudentGroup) REQUIRE g.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (s:Schedule) REQUIRE s.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (l:Lecture) REQUIRE l.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (c:LectureCourse) REQUIRE c.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (u:University) REQUIRE u.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (i:Institute) REQUIRE i.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (d:Department) REQUIRE d.id IS UNIQUE")
-        session.run("CREATE CONSTRAINT IF NOT EXISTS FOR (sp:Speciality) REQUIRE sp.id IS UNIQUE")
-
-    pg = get_pg_conn()
-    cur = pg.cursor()
-
-    with driver.session() as session:
-        # ── Узлы иерархии университета ──
-        # University: корневой узел (1 запись)
-        cur.execute("SELECT id, name, short_name, address, founded_year FROM university WHERE id = %s", (university_id,))
-        u_row = cur.fetchone()
-        if u_row:
-            session.run(
-                "CREATE (u:University {id: $id, name: $name, short_name: $short_name, address: $address, founded_year: $founded_year})",
-                id=str(u_row[0]), name=u_row[1], short_name=u_row[2] or "", address=u_row[3] or "", founded_year=u_row[4] or 0
-            )
-
-        # Institute: 5 институтов, связь PART_OF → University
-        cur.execute("SELECT id, name, short_name, dean FROM institute")
-        inst_rows = cur.fetchall()
-        batch = [{"id": str(r[0]), "name": r[1], "short_name": r[2] or "", "dean": r[3] or ""} for r in inst_rows]
-        session.run(
-            "UNWIND $batch AS row CREATE (i:Institute {id: row.id, name: row.name, short_name: row.short_name, dean: row.dean})",
-            batch=batch
-        )
-        # Связь Institute-[PART_OF]->University
-        batch = [{"iid": str(r[0]), "uid": university_id} for r in inst_rows]
-        session.run(
-            "UNWIND $batch AS row MATCH (i:Institute {id: row.iid}), (u:University {id: row.uid}) CREATE (i)-[:PART_OF]->(u)",
-            batch=batch
-        )
-
-        # Department: 15 кафедр, связь PART_OF → Institute
-        cur.execute("SELECT id, name, short_name, head, institute_id FROM department")
-        dept_rows = cur.fetchall()
-        batch = [{"id": str(r[0]), "name": r[1], "short_name": r[2] or "", "head": r[3] or "", "institute_id": str(r[4])} for r in dept_rows]
-        session.run(
-            "UNWIND $batch AS row CREATE (d:Department {id: row.id, name: row.name, short_name: row.short_name, head: row.head, institute_id: row.institute_id})",
-            batch=batch
-        )
-        batch = [{"did": str(r[0]), "iid": str(r[4])} for r in dept_rows]
-        session.run(
-            "UNWIND $batch AS row MATCH (d:Department {id: row.did}), (i:Institute {id: row.iid}) CREATE (d)-[:PART_OF]->(i)",
-            batch=batch
-        )
-
-        # Speciality: 30 специальностей, связь PART_OF → Department (через department_specialities)
-        cur.execute("SELECT id, name, code, degree_level, duration_years FROM speciality")
-        spec_rows = cur.fetchall()
-        batch = [{"id": str(r[0]), "name": r[1], "code": r[2] or "", "degree_level": r[3] or "", "duration_years": r[4] or 0} for r in spec_rows]
-        session.run(
-            "UNWIND $batch AS row CREATE (sp:Speciality {id: row.id, name: row.name, code: row.code, degree_level: row.degree_level, duration_years: row.duration_years})",
-            batch=batch
-        )
-        # Связь Speciality-[PART_OF]->Department (по таблице department_specialities)
-        cur.execute("SELECT speciality_id, department_id FROM department_specialities")
-        ds_rows = cur.fetchall()
-        batch = [{"spid": str(r[0]), "did": str(r[1])} for r in ds_rows]
-        session.run(
-            "UNWIND $batch AS row MATCH (sp:Speciality {id: row.spid}), (d:Department {id: row.did}) CREATE (sp)-[:PART_OF]->(d)",
-            batch=batch
-        )
-
-        # ── Узлы Student (все свойства для замены PG-запросов), батч 500 ──
-        cur.execute("SELECT id, first_name, last_name, patronymic, student_card_number, email, phone, status, enrollment_date, group_id FROM student")
-        students = cur.fetchall()
-        batch = []
-        for s in students:
-            batch.append({
-                "id": str(s[0]), "name": f"{s[1]} {s[2]} {s[3]}", "card_number": s[4],
-                "first_name": s[1], "last_name": s[2], "patronymic": s[3] or "",
-                "email": s[5], "phone": s[6], "status": s[7], "enrollment_date": str(s[8]), "group_id": str(s[9])
-            })
-            if len(batch) >= 500:
-                session.run(
-                    "UNWIND $batch AS row CREATE (s:Student {id: row.id, name: row.name, card_number: row.card_number, first_name: row.first_name, last_name: row.last_name, patronymic: row.patronymic, email: row.email, phone: row.phone, status: row.status, enrollment_date: row.enrollment_date, group_id: row.group_id})",
-                    batch=batch
-                )
-                batch = []
-        if batch:
-            session.run(
-                "UNWIND $batch AS row CREATE (s:Student {id: row.id, name: row.name, card_number: row.card_number, first_name: row.first_name, last_name: row.last_name, patronymic: row.patronymic, email: row.email, phone: row.phone, status: row.status, enrollment_date: row.enrollment_date, group_id: row.group_id})",
-                batch=batch
-            )
-
-        # Создание узлов StudentGroup (название + год + куратор + специальность)
-        cur.execute("SELECT id, name, enrollment_year, curator, speciality_id FROM student_group")
-        groups = cur.fetchall()
-        batch = [{"id": str(g[0]), "name": g[1], "enrollment_year": g[2], "curator": g[3] or "", "speciality_id": str(g[4])} for g in groups]
-        session.run(
-            "UNWIND $batch AS row CREATE (g:StudentGroup {id: row.id, name: row.name, enrollment_year: row.enrollment_year, curator: row.curator, speciality_id: row.speciality_id})",
-            batch=batch
-        )
-
-        # Создание узлов Schedule (дата, время начала/конца, аудитория, неделя, преподаватель), батч 500
-        cur.execute("SELECT id, scheduled_date, start_time, end_time, classroom, week_start_date, teacher_name FROM schedule")
-        schedules = cur.fetchall()
-        batch = [{"id": str(s[0]), "date": str(s[1]), "start_time": str(s[2]), "end_time": str(s[3]), "classroom": s[4] or "", "week_start_date": str(s[5]), "teacher_name": s[6] or ""} for s in schedules]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row CREATE (s:Schedule {id: row.id, date: row.date, start_time: row.start_time, end_time: row.end_time, classroom: row.classroom, week_start_date: row.week_start_date, teacher_name: row.teacher_name})",
-                batch=batch[i:i+500]
-            )
-
-        # Создание узлов Lecture (название, тип, оборудование, теги), батч 500
-        cur.execute("SELECT id, title, lecture_type, computer_type, tags FROM lecture")
-        lectures = cur.fetchall()
-        batch = []
-        for l in lectures:
-            tags = l[4] if l[4] else []
-            if isinstance(tags, str):
-                tags = [t.strip() for t in tags.split(",") if t.strip()]
-            batch.append({"id": str(l[0]), "title": l[1], "type": l[2] or "", "computer_type": l[3] or "", "tags": tags})
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row CREATE (l:Lecture {id: row.id, title: row.title, type: row.type, computer_type: row.computer_type, tags: row.tags})",
-                batch=batch[i:i+500]
-            )
-
-        # Создание узлов LectureCourse (название, семестр, часы, описание, специальность)
-        cur.execute("SELECT id, name, semester, total_hours, lecture_hours, practice_hours, lab_hours, description, speciality_id FROM lecture_course")
-        courses = cur.fetchall()
-        batch = [{"id": str(c[0]), "name": c[1], "semester": c[2], "total_hours": c[3] or 0, "lecture_hours": c[4] or 0, "practice_hours": c[5] or 0, "lab_hours": c[6] or 0, "description": c[7] or "", "speciality_id": str(c[8])} for c in courses]
-        session.run(
-            "UNWIND $batch AS row CREATE (c:LectureCourse {id: row.id, name: row.name, semester: row.semester, total_hours: row.total_hours, lecture_hours: row.lecture_hours, practice_hours: row.practice_hours, lab_hours: row.lab_hours, description: row.description, speciality_id: row.speciality_id})",
-            batch=batch
-        )
-
-        # Связь MEMBER_OF: Student → StudentGroup (студент состоит в группе)
-        cur.execute("SELECT id, group_id FROM student")
-        membership = cur.fetchall()
-        batch = [{"sid": str(m[0]), "gid": str(m[1])} for m in membership]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row MATCH (s:Student {id: row.sid}), (g:StudentGroup {id: row.gid}) CREATE (s)-[:MEMBER_OF]->(g)",
-                batch=batch[i:i+500]
-            )
-
-        # Связь CONTAINS: StudentGroup → Schedule (группа имеет расписание)
-        cur.execute("SELECT id, group_id FROM schedule")
-        group_schedule = cur.fetchall()
-        batch = [{"sid": str(g[0]), "gid": str(g[1])} for g in group_schedule]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row MATCH (s:Schedule {id: row.sid}), (g:StudentGroup {id: row.gid}) CREATE (g)-[:CONTAINS]->(s)",
-                batch=batch[i:i+500]
-            )
-
-        # Связь PART_OF: Schedule → Lecture (расписание относится к лекции)
-        cur.execute("SELECT id, lecture_id FROM schedule")
-        sched_lecture = cur.fetchall()
-        batch = [{"sid": str(s[0]), "lid": str(s[1])} for s in sched_lecture]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row MATCH (s:Schedule {id: row.sid}), (l:Lecture {id: row.lid}) CREATE (s)-[:PART_OF]->(l)",
-                batch=batch[i:i+500]
-            )
-
-        # Связь BELONGS_TO: Lecture → LectureCourse (лекция принадлежит курсу)
-        cur.execute("SELECT id, course_id FROM lecture")
-        lecture_course = cur.fetchall()
-        batch = [{"lid": str(l[0]), "cid": str(l[1])} for l in lecture_course]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row MATCH (l:Lecture {id: row.lid}), (c:LectureCourse {id: row.cid}) CREATE (l)-[:BELONGS_TO]->(c)",
-                batch=batch[i:i+500]
-            )
-
-        # Связь SHOULD_ATTEND: Student → Schedule (студент должен присутствовать)
-        cur.execute("""
-            SELECT DISTINCT s.id, sch.id
-            FROM student s
-            JOIN schedule sch ON sch.group_id = s.group_id
-        """)
-        should_attend = cur.fetchall()
-        batch = [{"sid": str(s[0]), "schid": str(s[1])} for s in should_attend]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row MATCH (s:Student {id: row.sid}), (sch:Schedule {id: row.schid}) CREATE (s)-[:SHOULD_ATTEND]->(sch)",
-                batch=batch[i:i+500]
-            )
-
-        # Связь ATTENDED: Student → Schedule (фактическое посещение — из таблицы attendance;
-        # связь создаётся для ВСЕХ записей, включая is_present=FALSE, т.к. у связи нет boolean-свойства)
-        cur.execute("SELECT DISTINCT student_id, schedule_id FROM attendance")
-        attended = cur.fetchall()
-        batch = [{"sid": str(a[0]), "schid": str(a[1])} for a in attended]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row MATCH (s:Student {id: row.sid}), (sch:Schedule {id: row.schid}) CREATE (s)-[:ATTENDED]->(sch)",
-                batch=batch[i:i+500]
-            )
-
-        # Связь FOR_SPECIALITY: LectureCourse → Speciality (курс относится к специальности)
-        cur.execute("SELECT id, speciality_id FROM lecture_course")
-        course_spec = cur.fetchall()
-        batch = [{"cid": str(c[0]), "spid": str(c[1])} for c in course_spec]
-        for i in range(0, len(batch), 500):
-            session.run(
-                "UNWIND $batch AS row MATCH (c:LectureCourse {id: row.cid}), (sp:Speciality {id: row.spid}) CREATE (c)-[:FOR_SPECIALITY]->(sp)",
-                batch=batch[i:i+500]
-            )
-
-    cur.close()
-    pg.close()
-    driver.close()
-    logger.info("Neo4j populated")
-
-
-def populate_redis(student_ids, student_data):
-    """
-    Заполнение Redis: для каждого студента создаётся Hash-ключ student:{uuid}
-    с полями ФИО, email, номер зачётки, группа, статус, дата зачисления.
-    TTL каждого ключа — 7200 с (2 часа). Вставка через pipeline пакетами по 500
-    для снижения числа round-trip.
-    """
-    r = get_redis()
-    # Очистка Redis перед заполнением
-    r.flushdb()
-
-    pipe = r.pipeline()
-    for i, sid in enumerate(student_ids):
-        if i < len(student_data):
-            d = student_data[i]
-            key = f"student:{sid}"
-            # Pipeline HSET student:{uuid} с TTL=7200с (2 часа), батч 500 для экономии памяти
-            pipe.hset(key, mapping={
-                "first_name": d[2],
-                "last_name": d[3],
-                "patronymic": d[4] or "",
-                "email": d[5],
-                "phone": d[6],
-                "student_card_number": d[7],
-                "group_id": d[1],
-                "status": d[9],
-                "enrollment_date": str(d[8])
-            })
-            pipe.expire(key, 7200)
-            if i % 500 == 0:
-                pipe.execute()
-                pipe = r.pipeline()
-    pipe.execute()
-
-    logger.info(f"Redis: cached {len(student_ids)} students")
-
-
-def populate_mongodb(university_id, institute_ids, department_ids, speciality_ids, dept_spec_ids):
-    """
-    Заполнение MongoDB: создаётся один вложенный документ иерархии
-    University → Institutes[] → Departments[] → Specialities[].
-    Вместо 4 JOIN-запросов в реляционной схеме здесь достаточно
-    одного findOne() для получения всей иерархии целиком.
-    """
-    client = get_mongo()
-    db = client["university"]
-    hierarchy = db["hierarchy"]
-    # Очистка коллекции перед заполнением
-    hierarchy.drop()
-
-    pg = get_pg_conn()
-    cur = pg.cursor()
-
-    # Построение вложенного документа: University → Institutes → Departments → Specialities
-    inst_docs = []
-    for i, inst_id in enumerate(institute_ids):
-        cur.execute("SELECT name, short_name, dean FROM institute WHERE id = %s", (inst_id,))
-        inst_row = cur.fetchone()
-        if not inst_row:
-            continue
-
-        dept_docs = []
-        cur.execute("SELECT id, name, short_name, head FROM department WHERE institute_id = %s", (inst_id,))
-        for dept_row in cur.fetchall():
-            dept_doc = {
-                "id": str(dept_row[0]),
-                "name": dept_row[1],
-                "short_name": dept_row[2],
-                "head": dept_row[3],
-                "specialities": []
-            }
-            cur.execute("""
-                SELECT s.id, s.name, s.code, s.degree_level
-                FROM department_specialities ds
-                JOIN speciality s ON ds.speciality_id = s.id
-                WHERE ds.department_id = %s
-            """, (dept_row[0],))
-            for spec_row in cur.fetchall():
-                dept_doc["specialities"].append({
-                    "id": str(spec_row[0]),
-                    "name": spec_row[1],
-                    "code": spec_row[2],
-                    "degree_level": spec_row[3]
-                })
-            dept_docs.append(dept_doc)
-
-        inst_docs.append({
-            "id": str(inst_id),
-            "name": inst_row[0],
-            "short_name": inst_row[1],
-            "dean": inst_row[2],
-            "departments": dept_docs
-        })
-
-    university_doc = {
-        "_id": str(university_id),
-        "name": "РТУ МИРЭА",
-        "short_name": "МИРЭА",
-        "institutes": inst_docs
-    }
-
-    # Вставка единого документа иерархии (один findOne вместо 4 JOIN в PostgreSQL)
-    hierarchy.insert_one(university_doc)
-
-    cur.close()
-    pg.close()
-    client.close()
-    logger.info("MongoDB: hierarchy document created")
-
-
-def clear_all_stores():
-    """
-    Очистка всех 5 хранилищ. В PostgreSQL таблицы очищаются через
-    TRUNCATE CASCADE в порядке, учитывающем внешние ключи
-    (сначала зависимые, потом родительские). Для ускорения
-    временно отключается проверка FK: SET session_replication_role = replica.
-    Остальные хранилища очищаются собственными нативными методами.
-    """
-    logger.info("Clearing all stores...")
-
     try:
         pg = get_pg_conn()
         cur = pg.cursor()
-        # Отключаем FK-проверки для ускорения TRUNCATE
-        cur.execute("SET session_replication_role = replica")
-        # Таблицы в порядке зависимостей (сначала зависимые, потом главные)
+        cur.execute("SET CONSTRAINTS ALL DEFERRED")
         tables = [
             "attendance", "schedule", "student", "student_group",
             "lecture_material", "lecture", "lecture_course",
@@ -1097,53 +590,14 @@ def clear_all_stores():
         ]
         for t in tables:
             cur.execute(f"TRUNCATE TABLE {t} CASCADE")
-        # Возвращаем FK-проверки
-        cur.execute("SET session_replication_role = DEFAULT")
         pg.commit()
         cur.close()
         pg.close()
         logger.info("PostgreSQL cleared")
+        return {"status": "cleared"}
     except Exception as e:
-        logger.error(f"Error clearing PostgreSQL: {e}")
-
-    try:
-        # Удаление индекса lectures
-        es = get_es()
-        if es.indices.exists(index="lectures"):
-            es.indices.delete(index="lectures")
-        logger.info("Elasticsearch cleared")
-    except Exception as e:
-        logger.error(f"Error clearing ES: {e}")
-
-    try:
-        # Удаление всех узлов и связей
-        driver = get_neo4j_driver()
-        with driver.session() as session:
-            session.run("MATCH (n) DETACH DELETE n")
-        driver.close()
-        logger.info("Neo4j cleared")
-    except Exception as e:
-        logger.error(f"Error clearing Neo4j: {e}")
-
-    try:
-        # Очистка всех ключей
-        r = get_redis()
-        r.flushdb()
-        logger.info("Redis cleared")
-    except Exception as e:
-        logger.error(f"Error clearing Redis: {e}")
-
-    try:
-        # Удаление коллекции hierarchy
-        client = get_mongo()
-        db = client["university"]
-        db["hierarchy"].drop()
-        client.close()
-        logger.info("MongoDB cleared")
-    except Exception as e:
-        logger.error(f"Error clearing MongoDB: {e}")
-
-    return {"status": "cleared"}
+        logger.error(f"PostgreSQL clear error: {e}")
+        return {"status": "error", "message": str(e)}
 
 
 def get_status():

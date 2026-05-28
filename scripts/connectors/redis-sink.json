@@ -1,0 +1,16 @@
+{
+  "connector.class": "io.lenses.streamreactor.connect.redis.sink.RedisSinkConnector",
+  "connect.redis.host": "redis",
+  "connect.redis.port": "6379",
+  "topics": "university.public.student,university.public.student_group",
+  "connect.redis.kcql": "INSERT INTO student- SELECT * FROM university.public.student PK id;INSERT INTO student_group- SELECT * FROM university.public.student_group PK id",
+  "tasks.max": "1",
+  "transforms": "unwrap",
+  "transforms.unwrap.type": "io.debezium.transforms.ExtractNewRecordState",
+  "transforms.unwrap.drop.tombstones": "true",
+  "transforms.unwrap.delete.handling.mode": "rewrite",
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "true",
+  "value.converter.schemas.enable": "true"
+}

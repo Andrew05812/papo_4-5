@@ -1,6 +1,40 @@
+# ==============================================================================
+# Docker Compose — полная архитектура CDC-пайплайна для полиглот-хранения
+#
+# Поток данных (соответствует архитектурной диаграмме):
+#
+#   Генератор → PostgreSQL → (Debezium Source) → Kafka → (5 Sink коннекторов) → 4 СУБД
+#                                                                      ├→ ElasticSearch
+#                                                                      ├→ Redis
+#                                                                      ├→ Neo4j
+#                                                                      └→ MongoDB
+#
+# Мониторинг: Kafka → Telegraf → InfluxDB 2 → Grafana
+# UI:         Lab1/2/3 → nginx (mTLS) → api-gateway → генератор
+# Управление: Control Center (:9021) — веб-интерфейс для Kafka
+#
+# 1-3 лабы подключаются напрямую к СУБД (как и раньше).
+# Единственное изменение: генератор заполняет ТОЛЬКО PostgreSQL,
+# а остальные БД заполняются автоматически через CDC-пайплайн.
+# ==============================================================================
+
 services:
+  # ==============================================================================
+  # POSTGRESQL — мастер-СУБД, источник данных для CDC
+  #
+  # Роль: хранит ВСЕ данные (12 таблиц схемы университета).
+  # Генератор заполняет только Постгрес.
+  # Debezium Source Connector читает WAL-лог PG и отправляет каждое
+  # изменение (INSERT/UPDATE/DELETE) в соответствующий Kafka-топик.
+  #
+  # Настройки CDC:
+  # - wal2json модуль (установлен в Dockerfile)
+  # - wal_level=logical (включено в CMD и ALTER SYSTEM)
+  # - PUBLICATION pub FOR ALL TABLES (создана в init.sql)
+  # ==============================================================================
   postgres:
-    image: postgres:16
+    build: ./postgres
+    container_name: postgres
     environment:
       POSTGRES_DB: university
       POSTGRES_USER: postgres
@@ -9,19 +43,177 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d university"]
       interval: 5s
       timeout: 5s
       retries: 10
 
+  # ==============================================================================
+  # KAFKA ECOSYSTEM — CDC pipeline
+  #
+  # Zookeeper → Broker → Schema Registry → Kafka Connect → Sink connectors
+  #
+  # Zookeeper: координатор Kafka (хранит метаданные: какие брокеры живы,
+  #   какие топики существуют, кто лидер каждой партиции).
+  #   В новых версиях Kafka (3.3+) можно без Zookeeper (KRaft mode),
+  #   но Confluent 7.4 по умолчанию использует Zookeeper.
+  #
+  # Broker: сервер Kafka — хранит топики (очереди сообщений).
+  #   Каждый топик = упорядоченный лог сообщений. Debezium пишет в топики,
+  #   Sink-коннекторы читают из топиков.
+  #   Два listener: 29092 (внутренний, для контейнеров) и 9092 (внешний, для хоста).
+  #
+  # Schema Registry: хранит JSON-схемы сообщений (Avro/JSON Schema).
+  #   В нашем случае не критичен (используем JsonConverter без схем),
+  #   но нужен для Kafka Connect (он требует schema.registry.url).
+  #
+  # Kafka Connect: ФРЕЙМВОРК для запуска коннекторов.
+  #   Worker-процесс, который загружает 6 коннекторов (1 source + 5 sink).
+  #   Каждый коннектор — плагин (JAR-файл), установленный в Dockerfile.
+  # ==============================================================================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181      # Порт для подключения Kafka-брокера
+      ZOOKEEPER_TICK_TIME: 2000        # Интервал сердцебиения (ms)
+    volumes:
+      - zk_data:/var/lib/zookeeper/data
+      - zk_logs:/var/lib/zookeeper/log
+
+  broker:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: broker
+    depends_on:
+      - zookeeper
+    ports:
+      - 9092:9092                      # Внешний порт (для доступа с хоста)
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      # Два listener: PLAINTEXT (внутренний, между контейнерами) и
+      # PLAINTEXT_HOST (внешний, для доступа с хоста машины)
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://broker:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"  # Автосоздание топиков (Debezium создаст 12 топиков)
+      # Репликация = 1 (один брокер, нет кластера)
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 100
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.4.0
+    container_name: schema-registry
+    ports:
+      - "8081:8081"
+    depends_on:
+      - broker
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: broker:29092
+
+  kafka-connect:
+    build: ./kafka-connect             # Свой Dockerfile (базовый образ + JAR)
+    container_name: kafka-connect
+    depends_on:
+      - broker
+      - schema-registry
+    ports:
+      - 8083:8083                      # REST API для управления коннекторами
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: "broker:29092"
+      CONNECT_REST_PORT: 8083
+      CONNECT_GROUP_ID: kafka-connect
+      # 3 внутренних топика Kafka Connect (хранят конфиги, offsets, статусы коннекторов)
+      CONNECT_CONFIG_STORAGE_TOPIC: _connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: _connect-offsets      # Позиция в Kafka для каждого коннектора
+      CONNECT_STATUS_STORAGE_TOPIC: _connect-status
+      # Конвертеры: ключ — String (PK записи), значение — JSON (Debezium envelope)
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: org.apache.kafka.connect.json.JsonConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: 'http://schema-registry:8081'
+      CONNECT_REST_ADVERTISED_HOST_NAME: "kafka-connect"
+      CONNECT_LOG4J_APPENDER_STDOUT_LAYOUT_CONVERSIONPATTERN: "[%d] %p %X{connector.context}%m (%c:%L)%n"
+      # Репликация = 1 (один брокер)
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: "1"
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: "1"
+      # Пути поиска плагинов (коннекторов)
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components,/data/connect-jars
+    volumes:
+      - connect_data:/data
+    # Все 5 коннекторов установлены в Dockerfile при сборке образа:
+    # Debezium 2.7.1 + Redis 6.0.2 (вручную из Maven/GitHub),
+    # ES + Neo4j 2.0.0 + MongoDB (через confluent-hub install при сборке).
+    # CdcHandler JAR также скопирован в Dockerfile.
+    # При запуске — сразу запускаем Connect worker.
+    command:
+      - bash
+      - -c
+      - |
+        echo "All connectors pre-installed in Dockerfile. Launching Kafka Connect worker..."
+        /etc/confluent/docker/run
+
+  # Control Center — веб-интерфейс для мониторинга Kafka
+  # Можно посмотреть: топики, коннекторы, сообщения, потребительские группы
+  # Доступ: http://localhost:9021
+  control-center:
+    image: confluentinc/cp-enterprise-control-center:7.4.0
+    container_name: control-center
+    depends_on:
+      - broker
+      - schema-registry
+      - kafka-connect
+    ports:
+      - "9021:9021"
+    environment:
+      CONTROL_CENTER_BOOTSTRAP_SERVERS: 'broker:29092'
+      CONTROL_CENTER_CONNECT_CONNECT_CLUSTER: 'kafka-connect:8083'
+      CONTROL_CENTER_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+      # Репликация = 1 (один брокер)
+      CONFLUENT_METRICS_TOPIC_REPLICATION: 1
+      CONTROL_CENTER_REPLICATION_FACTOR: 1
+      CONTROL_CENTER_COMMAND_TOPIC_REPLICATION: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_REPLICATION: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_PARTITIONS: 1
+      CONTROL_CENTER_INTERNAL_TOPICS_REPLICATION: 1
+      CONTROL_CENTER_MONITORING_INTERCEPTOR_TOPIC_PARTITIONS: 1
+      CONTROL_CENTER_STREAMS_NUM_STREAM_THREADS: 1
+      CONTROL_CENTER_STREAMS_CACHE_MAX_BYTES_BUFFERING: 104857600
+    command:
+      - bash
+      - -c
+      - |
+        echo "Waiting 60s for Kafka brokers to start"
+        sleep 60                          # Ждём пока Kafka и Connect запустятся
+        /etc/confluent/docker/run
+
+  # ==============================================================================
+  # SINK DATABASES — приёмники данных из Kafka
+  #
+  # Redis/ElasticSearch/Neo4j — заводские контейнеры (стандартные образы)
+  # MongoDB — свой контейнер (custom CDC handler в Kafka Connect)
+  #
+  # Данные в них попадают ТОЛЬКО через CDC-пайплайн:
+  #   Kafka → Sink коннектор → БД
+  # Генератор НЕ подключается к ним напрямую.
+  # ==============================================================================
+
+  # ElasticSearch — полнотекстовый поиск (BM25, fuzzy, анализаторы)
+  # CDC Sink создаёт pg_* индексы (по одному на таблицу PG)
+  # Генератор дополнительно создаёт 'lectures' индекс для Lab1
   elasticsearch:
     image: docker.elastic.co/elasticsearch/elasticsearch:8.12.0
+    container_name: elasticsearch
     environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - discovery.type=single-node       # Один узел (не кластер)
+      - xpack.security.enabled=false     # Без авторизации (для простоты)
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # Лимит памяти JVM
     ports:
       - "9200:9200"
     volumes:
@@ -32,35 +224,56 @@ services:
       timeout: 5s
       retries: 20
 
+  # Neo4j — графовая БД (узлы + связи между ними)
+  # CDC Sink создаёт узлы (University, Institute, Department...) и связи
+  # (PART_OF, MEMBER_OF, BELONGS_TO, SHOULD_ATTEND, ATTENDED, CONTAINS, FOR_SPECIALITY)
   neo4j:
-    image: neo4j:5
+    image: neo4j:5                       # Заводской контейнер (не кастомный)
+    container_name: neo4j
     environment:
-      NEO4J_AUTH: neo4j/password12345
+      NEO4J_AUTH: neo4j/password12345    # Логин:пароль для подключения
+      NEO4J_apoc_export_file_enabled: "true"
+      NEO4J_apoc_import_file_enabled: "true"
+      NEO4J_apoc_import_file_use__neo4j__config: "true"
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*"
+      NEO4JLABS_PLUGINS: '["apoc"]'
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "7474:7474"                      # Веб-интерфейс Neo4j Browser
+      - "7687:7687"                      # Bolt-протокол (для драйверов)
     volumes:
       - neo4j_data:/data
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p password12345 'RETURN 1' || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 20
+      interval: 15s
+      timeout: 10s
+      retries: 30
 
+  # Redis — кеш (ключ-значение, Hash-структуры)
+  # CDC Sink записывает только student и student_group (кешируемые таблицы)
+  # Lab1 Step4 использует Redis как cache-aside: HGETALL → miss → PG → HSET
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine               # Заводской контейнер (лёгкий Alpine-образ)
+    container_name: redis
     ports:
       - "6379:6379"
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "ping"]  # Проверка: Redis отвечает PONG на PING
       interval: 5s
       timeout: 5s
       retries: 5
 
+  # MongoDB — документная БД (JSON-документы, иерархические структуры)
+  # ДВА Sink коннектора:
+  #   1. mongodb-sink-flat — PostgresHandler (встроенный), все 12 таблиц → flat_data
+  #   2. mongodb-sink-hierarchy — UniversityHierarchyCdcHandler (кастомный!),
+  #      5 таблиц → один иерархический документ University→Institutes→Departments
   mongodb:
-    image: mongo:7
+    build:
+      context: .
+      dockerfile: mongodb/Dockerfile            # Свой (кастомный) контейнер MongoDB
+    container_name: mongodb
     ports:
       - "27017:27017"
     environment:
@@ -74,13 +287,106 @@ services:
       timeout: 5s
       retries: 10
 
+  # ==============================================================================
+  # REDIS CDC HANDLER — удалён (конфликтовал с stream-reactor Sink Connector)
+  #
+  # Stream-reactor Redis Sink Connector корректно обрабатывает Create/Update,
+  # но НЕ умеет физически удалять ключи (ставит __deleted=true — soft delete).
+  # Для физического Delete используется redis-cdc-delete consumer ниже.
+  # ==============================================================================
+
+  # ==============================================================================
+  # Redis CDC Delete Consumer — дополнение к stream-reactor Redis Sink
+  #
+  # Зачем: stream-reactor НЕ умеет физически удалять ключи из Redis при DELETE
+  #   из PostgreSQL. Он ставит __deleted="true" в JSON-значении (soft delete).
+  #   Но задание требует проверки Delete — ключ должен ФИЗИЧЕСКИ исчезнуть.
+  #
+  # Этот consumer слушает Kafka-топики student/student_group, и при получении
+  # DELETE-события (op='d') делает реальный DEL key в Redis.
+  # Формат ключа совпадает с stream-reactor: student-{uuid}, student_group-{uuid}
+  # ==============================================================================
+  redis-cdc-delete:
+    build:
+      context: .
+      dockerfile: redis-cdc-delete/Dockerfile
+    container_name: redis-cdc-delete
+    depends_on:
+      - broker
+      - redis
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: broker:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+
+  # ==============================================================================
+  # MONITORING — Telegraf → InfluxDB 2 → Grafana
+  #
+  # Telegraf: агент сбора метрик. Читает метрики из Kafka Connect (через
+  #   Kafka-топики _connect-*) и Docker-демона, отправляет в InfluxDB.
+  # InfluxDB 2: TSDB (time series database) — хранит метрики с привязкой
+  #   ко времени. Web UI на порту 8086.
+  # Grafana: визуализация метрик (дашборды, графики). Web UI на порту 3000.
+  # ==============================================================================
+  telegraf:
+    image: telegraf:1.29
+    container_name: telegraf
+    depends_on:
+      - broker
+    volumes:
+      - ./scripts/telegraf.conf:/etc/telegraf/telegraf.conf:ro
+
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    ports:
+      - "8086:8086"                      # Web UI + API
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: admin12345
+      DOCKER_INFLUXDB_INIT_ORG: university
+      DOCKER_INFLUXDB_INIT_BUCKET: monitoring
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: my-super-secret-token
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+  grafana:
+    image: grafana/grafana:10.3.3
+    container_name: grafana
+    depends_on:
+      - influxdb
+    ports:
+      - "3000:3000"                      # Web UI (admin/admin)
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  # ==============================================================================
+  # CERTIFICATES + NGINX — mTLS (mutual TLS)
+  #
+  # cert-init: одноразовый контейнер, генерирует SSL-сертификаты:
+  #   - CA (Root Certificate Authority) — корневой сертификат
+  #   - server.crt — сертификат для nginx (сервер)
+  #   - client.crt — сертификат для api-gateway (клиент)
+  # nginx: обратный прокси с mTLS — проверяет клиентский сертификат
+  #   перед тем как пропустить запрос к lab1/lab2/lab3
+  # ==============================================================================
   cert-init:
     image: alpine:3.19
+    container_name: cert-init
     volumes:
       - certs:/certs
     entrypoint: >
       sh -c "
-        apk add --no-cache openssl
+        apk add --no-cache openssl || (
+          echo 'apk failed, retrying in 10s...'
+          sleep 10
+          apk add --no-cache openssl
+        )
         if [ ! -f /certs/ca.crt ]; then
           echo 'Generating Root CA...'
           openssl genrsa -out /certs/ca.key 2048
@@ -105,14 +411,18 @@ services:
         chmod 600 /certs/ca.key /certs/server.key /certs/client.key
       "
 
+  # nginx — обратный прокси с mTLS (mutual TLS = двусторонняя аутентификация)
+  # Клиент (api-gateway) должен предоставить клиентский сертификат,
+  # иначе nginx отклонит соединение. Это защита от несанкционированного доступа.
   nginx:
     image: nginx:1.25-alpine
+    container_name: nginx
     volumes:
       - ./scripts/nginx.conf:/etc/nginx/conf.d/default.conf:ro
-      - certs:/etc/nginx/certs:ro
+      - certs:/etc/nginx/certs:ro        # SSL-сертификаты (только чтение)
     depends_on:
       cert-init:
-        condition: service_completed_successfully
+        condition: service_completed_successfully  # Ждём генерацию сертификатов
       lab1:
         condition: service_started
       lab2:
@@ -120,44 +430,47 @@ services:
       lab3:
         condition: service_started
     ports:
-      - "443:443"
+      - "443:443"                        # HTTPS порт
 
+  # ==============================================================================
+  # GENERATOR — Генератор данных и схемы
+  #
+  # Заполняет ТОЛЬКО PostgreSQL. Остальные БД заполняются через CDC pipeline:
+  #   PG → Debezium → Kafka → Sink connectors → ES/Redis/Neo4j/MongoDB
+  # Lab1 создаёт 'lectures' ES-индекс при старте из данных PG (ensure_lectures_index)
+  #
+  # REST API:
+  #   POST /generate — сгенерировать данные (12 таблиц PG)
+  #   DELETE /clear — очистить PG + ES lectures
+  #   GET /status — проверить наличие данных
+  #   GET /groups — список групп (для Lab3)
+  # ==============================================================================
   generator:
     build: ./generator
+    container_name: generator
     ports:
       - "8010:8010"
     depends_on:
       postgres:
-        condition: service_healthy
-      elasticsearch:
-        condition: service_healthy
-      neo4j:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      mongodb:
-        condition: service_healthy
+        condition: service_healthy       # Ждём пока PG будет готов принимать запросы
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_PORT=5432
       - POSTGRES_DB=university
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
-      - ES_HOST=elasticsearch
-      - ES_PORT=9200
-      - NEO4J_URI=bolt://neo4j:7687
-      - NEO4J_USER=neo4j
-      - NEO4J_PASSWORD=password12345
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - MONGO_HOST=mongodb
-      - MONGO_PORT=27017
-      - MONGO_USER=mongo
-      - MONGO_PASSWORD=password12345
-      - MONGO_DB=university
 
+  # ==============================================================================
+  # API GATEWAY + LAB EXEC UI
+  #
+  # api-gateway: REST API фасад для фронтенда (LAB Exec UI).
+  #   - Маршрутизирует запросы к nginx (lab1/2/3) и генератору
+  #   - Проверяет JWT-токены для авторизации
+  #   - Подключается к nginx по mTLS (предъявляет клиентский сертификат)
+  # ==============================================================================
   api-gateway:
     build: ./api-gateway
+    container_name: api-gateway
     ports:
       - "8000:8000"
     depends_on:
@@ -168,7 +481,7 @@ services:
       generator:
         condition: service_started
     volumes:
-      - certs:/certs:ro
+      - certs:/certs:ro                  # Клиентский сертификат для mTLS
     environment:
       - NGINX_URL=https://nginx:443
       - GENERATOR_URL=http://generator:8010
@@ -178,8 +491,20 @@ services:
       - CERT_CLIENT_CRT=/certs/client.crt
       - CERT_CLIENT_KEY=/certs/client.key
 
+  # ==============================================================================
+  # LAB SERVICES — Lab1, Lab2, Lab3 (запросы первого семестра)
+  #
+  # Код лаб НЕ изменён — они подключаются к тем же СУБД что и раньше.
+  # Единственная разница: данные в Neo4j/Redis/MongoDB теперь попадают
+  # через CDC-пайплайн, а не напрямую из генератора.
+  #
+  # Lab1: ES (lectures index) + Neo4j (SHOULD_ATTEND) + PG (is_present) + Redis (cache-aside)
+  # Lab2: только Neo4j (запросы по графу: лекции, кафедры, студенты)
+  # Lab3: Neo4j (навигация по графу) + PG (attendance.is_present)
+  # ==============================================================================
   lab1:
     build: ./lab1
+    container_name: lab1
     depends_on:
       elasticsearch:
         condition: service_healthy
@@ -207,6 +532,7 @@ services:
 
   lab2:
     build: ./lab2
+    container_name: lab2
     depends_on:
       neo4j:
         condition: service_healthy
@@ -219,6 +545,7 @@ services:
 
   lab3:
     build: ./lab3
+    container_name: lab3
     depends_on:
       neo4j:
         condition: service_healthy
@@ -236,10 +563,21 @@ services:
       - JWT_SECRET=polyglot_jwt_secret_key_2026
       - JWT_ALGORITHM=HS256
 
+# ==============================================================================
+# VOLUMES — постоянное хранение данных
+# Docker volumes сохраняют данные между перезапусками контейнеров.
+# Без volumes при docker compose down данные удалятся.
+# ==============================================================================
 volumes:
-  postgres_data:
-  es_data:
-  neo4j_data:
-  redis_data:
-  mongo_data:
-  certs:
+  postgres_data:      # Данные PostgreSQL (12 таблиц)
+  es_data:            # Данные ElasticSearch (pg_* индексы + lectures)
+  neo4j_data:         # Данные Neo4j (узлы + связи)
+  redis_data:         # Данные Redis (кешированные student/student_group)
+  mongo_data:         # Данные MongoDB (flat_data + hierarchy)
+  certs:              # SSL-сертификаты (CA, server, client)
+  zk_data:            # Данные Zookeeper
+  zk_logs:            # Логи Zookeeper
+  kafka_data:         # Данные Kafka (топики с CDC-событиями)
+  connect_data:       # Данные Kafka Connect (offsets, configs)
+  influxdb_data:      # Метрики мониторинга
+  grafana_data:       # Дашборды Grafana

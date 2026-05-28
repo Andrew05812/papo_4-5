@@ -1,0 +1,16 @@
+{
+  "connector.class": "com.mongodb.kafka.connect.MongoSinkConnector",
+  "connection.uri": "mongodb://mongo:password12345@mongodb:27017",
+  "database": "university_cdc",
+  "collection": "flat_data",
+  "topics": "university.public.university,university.public.institute,university.public.department,university.public.speciality,university.public.department_specialities,university.public.lecture_course,university.public.lecture,university.public.lecture_material,university.public.student_group,university.public.student,university.public.schedule,university.public.attendance",
+  "change.data.capture.handler": "com.mongodb.kafka.connect.sink.cdc.debezium.rdbms.postgres.PostgresHandler",
+  "delete.on.null.values": "true",
+  "document.id.strategy": "com.mongodb.kafka.connect.sink.processor.id.strategy.FullKeyStrategy",
+  "writemodel.strategy": "com.mongodb.kafka.connect.sink.writemodel.strategy.ReplaceOneDefaultStrategy",
+  "tasks.max": "1",
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "true",
+  "value.converter.schemas.enable": "true"
+}

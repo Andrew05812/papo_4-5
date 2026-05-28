@@ -154,3 +154,10 @@ CREATE INDEX idx_schedule_lecture_week ON schedule (lecture_id, week_start_date)
 CREATE INDEX idx_attendance_schedule_week_student ON attendance (schedule_id, week_start_date, student_id);
 CREATE INDEX idx_lecture_type ON lecture (lecture_type);
 CREATE INDEX idx_lecture_course_semester_spec ON lecture_course (semester, speciality_id);
+
+-- ==============================================================================
+-- Публикация для логической репликации (CDC)
+-- Debezium Source Connector читает эту публикацию для отслеживания изменений.
+-- PUBLICATION pub FOR ALL TABLES — публикует ВСЕ таблицы схемы public.
+-- ==============================================================================
+CREATE PUBLICATION pub FOR ALL TABLES;

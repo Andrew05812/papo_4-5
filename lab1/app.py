@@ -102,6 +102,95 @@ def get_es():
     return Elasticsearch(f"http://{ES_HOST}:{ES_PORT}")
 
 
+@app.on_event("startup")
+def ensure_lectures_index():
+    """
+    Создаёт объединённый индекс 'lectures' из pg_* CDC-индексов ES.
+    Генератор заполняет ТОЛЬКО PostgreSQL; CDC pipeline заполняет pg_* индексы.
+    Lab1 сам создаёт сервисный индекс lectures (BM25 + russian_custom анализатор),
+    объединяющий pg_lecture + pg_lecture_course + pg_lecture_material.
+    """
+    import logging
+    logger = logging.getLogger("lab1.setup")
+    try:
+        es = get_es()
+        if es.indices.exists(index="lectures"):
+            logger.info("ES index 'lectures' already exists")
+            return
+        logger.info("Creating ES index 'lectures' from pg_* CDC indices...")
+        es.indices.create(index="lectures", body={
+            "settings": {
+                "analysis": {
+                    "filter": {
+                        "russian_stop": {"type": "stop", "stopwords": "_russian_"},
+                        "russian_stemmer": {"type": "stemmer", "language": "russian"}
+                    },
+                    "analyzer": {
+                        "russian_custom": {
+                            "type": "custom",
+                            "tokenizer": "standard",
+                            "filter": ["lowercase", "russian_stop", "russian_stemmer"]
+                        }
+                    }
+                }
+            },
+            "mappings": {
+                "properties": {
+                    "lecture_id": {"type": "keyword"},
+                    "course_id": {"type": "keyword"},
+                    "course_name": {"type": "text", "analyzer": "russian_custom"},
+                    "title": {"type": "text", "analyzer": "russian_custom"},
+                    "annotation": {"type": "text", "analyzer": "russian_custom"},
+                    "content_text": {"type": "text", "analyzer": "russian_custom"},
+                    "lecture_type": {"type": "keyword"},
+                    "tags": {"type": "keyword"},
+                    "computer_type": {"type": "text", "analyzer": "russian_custom"},
+                    "semester": {"type": "integer"}
+                }
+            }
+        })
+        from elasticsearch import helpers
+        pg = get_pg()
+        cur = pg.cursor()
+        cur.execute("""
+            SELECT l.id, l.course_id, lc.name as course_name, l.title, l.annotation,
+                   l.lecture_type, l.tags, l.computer_type,
+                   COALESCE(string_agg(lm.content_text, ' '), '') as content_text,
+                   lc.semester
+            FROM lecture l
+            JOIN lecture_course lc ON l.course_id = lc.id
+            LEFT JOIN lecture_material lm ON l.id = lm.lecture_id
+            GROUP BY l.id, lc.name, lc.semester
+        """)
+        actions = []
+        for row in cur.fetchall():
+            tags = row[6]
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+            elif tags is None:
+                tags = []
+            doc = {
+                "lecture_id": str(row[0]),
+                "course_id": str(row[1]),
+                "course_name": row[2],
+                "title": row[3],
+                "annotation": row[4] or "",
+                "lecture_type": row[5],
+                "tags": tags,
+                "computer_type": row[7] or "",
+                "content_text": row[8] or "",
+                "semester": row[9]
+            }
+            actions.append({"_index": "lectures", "_id": str(row[0]), "_source": doc})
+        if actions:
+            success, errors = helpers.bulk(es, actions, chunk_size=500, raise_on_error=False)
+            logger.info(f"ES: indexed {success}/{len(actions)} lectures")
+        cur.close()
+        pg.close()
+    except Exception as e:
+        logger.warning(f"ES lectures index setup warning: {e}")
+
+
 def get_neo4j():
     """Создаёт драйвер Neo4j для шага 2 (обход SHOULD_ATTEND + PART_OF)."""
     return GraphDatabase.driver(NEO4J_URI, auth=(NEO4J_USER, NEO4J_PASS))
@@ -180,6 +269,13 @@ def query_attendance_flow(
         return {"result": [], "steps": steps, "query_path": "ES → Neo4j → PostgreSQL → Redis",
                 "execution_time_sec": round(time.time() - start, 3)}
 
+    # Debezium хранит DATE в Neo4j как integer (дни от эпохи 1970-01-01)
+    # Конвертируем строковые даты YYYY-MM-DD в epoch-дни для Cypher-запроса
+    from datetime import date as date_type
+    epoch = date_type(1970, 1, 1)
+    neo_start_date = (date_type.fromisoformat(start_date) - epoch).days
+    neo_end_date = (date_type.fromisoformat(end_date) - epoch).days
+
     # --- Шаг 2: Neo4j — обход графа для получения пар студент↔расписание ---
     # Neo4j хранит связи (SHOULD_ATTEND), но НЕ хранит данные о фактическом посещении.
     # Получаем список (student_id, schedule_id) для передачи в PostgreSQL.
@@ -197,7 +293,7 @@ def query_attendance_flow(
             WHERE sch.week_start_date >= $start_date AND sch.week_start_date <= $end_date
             MATCH (st:Student)-[:SHOULD_ATTEND]->(sch)
             RETURN DISTINCT st.id AS student_id, sch.id AS schedule_id
-        """, lecture_ids=lecture_ids, start_date=start_date, end_date=end_date)
+        """, lecture_ids=lecture_ids, start_date=neo_start_date, end_date=neo_end_date)
 
         for record in result:
             neo_pairs.append((record["student_id"], record["schedule_id"]))
