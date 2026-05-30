@@ -192,8 +192,16 @@ docker exec broker kafka-topics --list --bootstrap-server broker:29092 | Select-
 ```
 
 ```powershell
+# Показать 3 сообщения из топика student (из истории):
+docker exec broker kafka-console-consumer --bootstrap-server broker:29092 --topic university.public.student --from-beginning --max-messages 3
+```
+
+```powershell
 # Control Center UI: http://localhost:9021
-# Topics → university.public.student → Messages — увидеть JSON записи
+# Topics → university.public.student → Messages
+# ВНИМАНИЕ: Control Center показывает только НОВЫЕ сообщения!
+# Чтобы увидеть сообщения в UI — триггерим UPDATE пока страница открыта:
+docker exec postgres psql -U postgres -d university -c "UPDATE university SET name=name"
 ```
 
 ---
