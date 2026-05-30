@@ -6,7 +6,9 @@ Lab3 Service — запланированные и посещённые часы
   объёма прослушанных часов лекций и необходимого объёма запланированных часов,
   в рамках всех курсов для каждого студента группы.
   Одна лекция = 2 академических часа.
-  В отчёт попадают только лекции, содержащие тег специальной дисциплины кафедры.
+  В отчёт попадают только лекции курсов, чья специальность является профильной
+  для кафедры (is_primary=true в department_specialities → свойство на связи
+  Speciality-[PART_OF {is_primary:true}]->Department в Neo4j).
   Результат: полная информация о группе, студенте, курсе, запланированных и посещённых часах.
 
 Путь запроса: Neo4j → PostgreSQL
@@ -14,9 +16,9 @@ Lab3 Service — запланированные и посещённые часы
 Шаг 1 — Neo4j:
   Обход графа от стартовой ноды Group по имени:
   Student-[MEMBER_OF]->Group-[CONTAINS]->Schedule-[PART_OF]->Lecture-[BELONGS_TO]->Course
-  Фильтр: lecture_type='лекция' AND ANY(tag IN l.tags WHERE tag IN special_tags).
+  Фильтр: lecture_type='лекция' AND (Course)-[:FOR_SPECIALITY]->(Speciality)-[r:PART_OF]->(Department) WHERE r.is_primary=true.
   Также получаем: lecture_hours из LectureCourse, student details из Student,
-  иерархию через LectureCourse-[FOR_SPECIALITY]->Speciality-[PART_OF]->Department-[PART_OF]->Institute-[PART_OF]->University.
+  иерархия через LectureCourse-[FOR_SPECIALITY]->Speciality-[PART_OF]->Department-[PART_OF]->Institute-[PART_OF]->University.
   Результат: студент → курсы → расписания + lecture_hours + student details + иерархия.
 
 Шаг 2 — PostgreSQL:
@@ -68,7 +70,7 @@ def verify_service_token(credentials: HTTPAuthorizationCredentials = Depends(sec
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# Конфигурация Neo4j: обход графа от стартовой ноды Group + фильтрация по тегам + иерархия
+# Конфигурация Neo4j: обход графа от стартовой ноды Group + фильтрация по is_primary + иерархия
 NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://neo4j:7687")
 NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
 NEO4J_PASS = os.environ.get("NEO4J_PASSWORD", "password12345")
@@ -107,17 +109,13 @@ def query_hours_report(
 
     # ── Шаг 1: Neo4j — обход графа от стартовой ноды Group ──
     # Цепочка: Student-[MEMBER_OF]->Group-[CONTAINS]->Schedule-[PART_OF]->Lecture-[BELONGS_TO]->Course
-    # Фильтр: lecture_type='лекция' AND теги спец. дисциплин.
+    # Фильтр: lecture_type='лекция' AND профильная специальность кафедры (is_primary=true).
     # Также: lecture_hours из Course, student details из Student, иерархия через Course→Speciality→Department→Institute→University.
     # Преимущество Neo4j: обход от 1 стартовой ноды Group за O(E) вместо 4 JOIN в SQL.
     logger.info(f"Step 1: Neo4j - graph traversal for group {group_name}")
     driver = get_neo4j()
 
-    # Теги специальных дисциплин кафедры
-    special_tags = ["спецдисциплина", "кафедральная_дисциплина", "профильная_дисциплина",
-                    "дисциплина_кафедры", "специализация"]
-
-    # Структура: student_id → {name, details, courses: {course_id → {name, semester, lecture_hours, schedule_ids, lecture_ids, tags}}}
+    # Структура: student_id → {name, details, courses: {course_id → {name, semester, lecture_hours, schedule_ids, lecture_ids}}}
     student_course_schedules = {}
     student_details = {}
     course_planned_hours = {}
@@ -125,16 +123,20 @@ def query_hours_report(
     hierarchy = {}
 
     with driver.session() as session:
-        # Комплексный Cypher-запрос: от Group по имени → студенты → расписания → лекции (со спец. тегами) → курсы + иерархия
+        # Комплексный Cypher-запрос: от Group по имени → студенты → расписания → лекции (тип=лекция) → курсы
+        # Фильтр спец. дисциплин: Course→Speciality-[PART_OF {is_primary:true}]->Department
+        # (is_primary=true из department_specialities → свойство на связи в Neo4j)
         result = session.run("""
             MATCH (g:StudentGroup {name: $group_name})
             MATCH (st:Student)-[:MEMBER_OF]->(g)
             MATCH (g)-[:CONTAINS]->(sch:Schedule)
             MATCH (sch)-[:PART_OF]->(l:Lecture)
-            WHERE l.type = 'лекция' AND ANY(tag IN l.tags WHERE tag IN $special_tags)
+            WHERE l.type = 'лекция'
             MATCH (l)-[:BELONGS_TO]->(c:LectureCourse)
-            // Иерархия: Course→Speciality→Department→Institute→University
-            OPTIONAL MATCH (c)-[:FOR_SPECIALITY]->(sp:Speciality)-[:PART_OF]->(d:Department)-[:PART_OF]->(i:Institute)-[:PART_OF]->(u:University)
+            MATCH (c)-[:FOR_SPECIALITY]->(sp)-[r:PART_OF]->(d:Department)
+            WHERE r.is_primary = true
+            // Иерархия: Department→Institute→University
+            MATCH (d)-[:PART_OF]->(i:Institute)-[:PART_OF]->(u:University)
             RETURN DISTINCT st.id AS student_id, st.name AS student_name,
                    st.first_name AS first_name, st.last_name AS last_name,
                    st.patronymic AS patronymic, st.email AS email,
@@ -142,11 +144,11 @@ def query_hours_report(
                    st.status AS status, st.enrollment_date AS enrollment_date,
                    c.id AS course_id, c.name AS course_name, c.semester AS semester,
                    c.lecture_hours AS lecture_hours,
-                   sch.id AS schedule_id, l.id AS lecture_id, l.title AS lecture_title, l.tags AS tags,
+                   sch.id AS schedule_id, l.id AS lecture_id, l.title AS lecture_title,
                    g.id AS group_id, g.enrollment_year AS enrollment_year, g.curator AS curator,
                    sp.name AS speciality_name, sp.code AS speciality_code,
                    d.name AS department_name, i.name AS institute_name, u.name AS university_name
-        """, group_name=group_name, special_tags=special_tags)
+        """, group_name=group_name)
 
         student_set = set()
         course_set = set()
@@ -181,8 +183,7 @@ def query_hours_report(
                     "name": record["course_name"],
                     "semester": record["semester"],
                     "schedule_ids": [],
-                    "lecture_ids": set(),
-                    "tags": record["tags"] or []
+                    "lecture_ids": set()
                 }
             student_course_schedules[sid]["courses"][cid]["schedule_ids"].append(record["schedule_id"])
             student_course_schedules[sid]["courses"][cid]["lecture_ids"].add(record["lecture_id"])
@@ -213,7 +214,7 @@ def query_hours_report(
     steps.append({
         "step": 1,
         "store": "Neo4j",
-        "action": "Обход графа: Student-[MEMBER_OF]->Group-[CONTAINS]->Schedule-[PART_OF]->Lecture-[BELONGS_TO]->Course + фильтр по спец. тегам + иерархия Course→Speciality→Department→Institute→University + student details + lecture_hours",
+        "action": "Обход графа: Student-[MEMBER_OF]->Group-[CONTAINS]->Schedule-[PART_OF]->Lecture-[BELONGS_TO]->Course + фильтр по is_primary (Speciality-[PART_OF {is_primary:true}]->Department) + иерархия Course→Speciality→Department→Institute→University + student details + lecture_hours",
         "result": f"Найдено {len(student_set)} студентов, {len(course_set)} курсов спец. дисциплин"
     })
 
@@ -284,8 +285,7 @@ def query_hours_report(
                 "planned_hours": planned_hours,
                 "attended_lectures": attended_count,
                 "attended_hours": attended_hours,
-                "total_scheduled_lectures": len(cdata["schedule_ids"]),
-                "special_tags": cdata["tags"]
+                "total_scheduled_lectures": len(cdata["schedule_ids"])
             })
 
         sd = student_details.get(sid, {})
@@ -309,7 +309,7 @@ def query_hours_report(
         "query_path": "Neo4j → PostgreSQL",
         "execution_time_sec": elapsed,
         "justification": {
-            "Neo4j": "Обход графа Student→Group→Schedule→Lecture→Course + фильтрация по спец. тегам + иерархия Course→Speciality→Department→Institute→University + student details + lecture_hours — O(E), 1 стартовая нода Group",
+            "Neo4j": "Обход графа Student→Group→Schedule→Lecture→Course + фильтрация по is_primary (Speciality-[PART_OF {is_primary:true}]->Department) + иерархия Course→Speciality→Department→Institute→University + student details + lecture_hours — O(E), 1 стартовая нода Group",
             "PostgreSQL": "Единственный источник данных о фактическом посещении (is_present=TRUE в partitioned attendance) — связь ATTENDED в Neo4j не отличает пришёл/не пришёл"
         }
     }

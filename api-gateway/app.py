@@ -293,11 +293,9 @@ async def lab2_query(semester: int, year: int, equipment: str = "", _=Depends(ve
 
 
 # ЛР3: Отчёт по группе — объём прослушанных и запланированных часов лекций
-# со спец. тегами дисциплины кафедры. 1 лекция = 2 академических часа.
-# Цепочка БД: PostgreSQL (lookup group_id по group_name) →
-#   Elasticsearch (фильтрация по спец. тегам: terms query) →
-#   Neo4j (обход графа: Student→Group→Schedule→Lecture→Course) →
-#   PostgreSQL (batch attendance + lecture_hours + student details)
+# профильных (is_primary) дисциплин кафедры. 1 лекция = 2 академических часа.
+# Цепочка БД: Neo4j (обход графа с фильтром is_primary) →
+#   PostgreSQL (batch attendance + is_present)
 @app.get("/hours/report")
 async def lab3_query(group_name: str, _=Depends(verify_token)):
     return await call_lab("/lab3/query", {"group_name": group_name})
@@ -696,7 +694,7 @@ pre.raw-json{background:var(--bg);padding:12px;border-radius:6px;font-size:11px;
         <div id="tab-lab3" class="tab-content">
             <div style="color:var(--muted);font-size:12px;margin-bottom:8px">
                 <b>Задание ЛР3:</b> Отчёт по заданной группе с указанием объёма прослушанных и запланированных часов лекций.
-                1 лекция = 2 академических часа. В отчёт попадают только лекции со спец. тегом дисциплины кафедры.
+                1 лекция = 2 академических часа. В отчёт попадают только лекции профильных дисциплин кафедры (is_primary=true).
                 <br>Состав полей: полная информация о группе, студенте, курсе, запланированных и посещённых часах.
             </div>
             <div class="collapsible" onclick="this.classList.toggle('open')">Показать/скрыть путь запроса и объяснение БД</div>            <div class="coll-body">
@@ -705,15 +703,12 @@ pre.raw-json{background:var(--bg);padding:12px;border-radius:6px;font-size:11px;
                     <div class="auth-step st-gw"><div class="anum">B</div><div><div class="atxt">Gateway проверяет user JWT, создаёт service JWT, mTLS к nginx</div></div></div>
                     <div class="auth-step st-nginx"><div class="anum">C</div><div><div class="atxt">Nginx проверяет client.crt, прокси в Lab3</div></div></div>
                     <div class="auth-step st-lab"><div class="anum">D</div><div><div class="atxt">Lab3 проверяет service JWT, выполняет запрос к 3 БД</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">0</div><div><div class="atxt"><span class="badge badge-pg">PostgreSQL</span> Lookup group_id по group_name (пользователь вводит название, не UUID)</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">1</div><div><div class="atxt"><span class="badge badge-es">Elasticsearch</span> Фильтрация по тегам спец. дисциплин (terms query: specdisciplina и т.д.)</div><div class="adet">Только лекции со спец. тегами попадают в отчёт, lecture_type=лекции</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">2</div><div><div class="atxt"><span class="badge badge-neo">Neo4j</span> Обход графа: Student-[MEMBER_OF]->Group-[CONTAINS]->Schedule-[PART_OF]->Lecture-[BELONGS_TO]->Course</div><div class="adet">1 стартовая нода Group, O(E) по индексу</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">3</div><div><div class="atxt"><span class="badge badge-pg">PostgreSQL</span> Batch attendance + lecture_hours + student details</div><div class="adet">attended_hours = attended_count * 2 (1 лекция = 2 ак.ч.), ANY(%s::uuid[]) batch</div></div></div>
+                    <div class="auth-step st-db"><div class="anum">1</div><div><div class="atxt"><span class="badge badge-neo">Neo4j</span> Обход графа: Student→Group→Schedule→Lecture→Course, фильтр по is_primary</div><div class="adet">Speciality-[PART_OF {is_primary:true}]->Department — профильные специальности кафедры, lecture_type=лекция. 1 стартовая нода Group, O(E)</div></div></div>
+                    <div class="auth-step st-db"><div class="anum">2</div><div><div class="atxt"><span class="badge badge-pg">PostgreSQL</span> Batch attendance: is_present=TRUE</div><div class="adet">attended_hours = attended_count * 2 (1 лекция = 2 ак.ч.), ANY(%s::uuid[]) batch</div></div></div>
                 </div>
             </div>
             <div class="arch-row" style="margin:6px 0">
                 <span class="badge badge-mtls">mTLS</span><span class="arch-arrow">&#10145;</span>
-                <span class="badge badge-es">ES</span><span class="arch-arrow">&#10145;</span>
                 <span class="badge badge-neo">Neo4j</span><span class="arch-arrow">&#10145;</span>
                 <span class="badge badge-pg">PG</span>
             </div>
@@ -964,7 +959,7 @@ function renderLab3(data){
     }
     html+=renderSteps(data.steps);
     if(data.students&&data.students.length){
-        html+='<table class="result-table"><thead><tr><th>Студент</th><th>Курс</th><th>Сем.</th><th>Теги</th><th>Запл. часов</th><th>Посещ. лекций</th><th>Посещ. часов</th><th>%</th></tr></thead><tbody>';
+        html+='<table class="result-table"><thead><tr><th>Студент</th><th>Курс</th><th>Сем.</th><th>Запл. часов</th><th>Посещ. лекций</th><th>Посещ. часов</th><th>%</th></tr></thead><tbody>';
         data.students.forEach(s=>{
             const numCourses=s.courses.length;
             const totalPct=s.total_planned_hours>0?((s.total_attended_hours/s.total_planned_hours)*100):0;
@@ -975,7 +970,6 @@ function renderLab3(data){
                     html+='<td rowspan="'+numCourses+'" style="font-weight:600;vertical-align:top;border-right:1px solid var(--border)">'+s.student_name+'<div style="font-size:10px;color:#fbbf24;margin-top:3px">Итого: '+s.total_attended_hours+'/'+s.total_planned_hours+' ак.ч. ('+totalPct.toFixed(1)+'%)'+pctBar(totalPct)+'</div></td>';
                 }
                 html+='<td>'+c.course_name+'</td><td>'+c.semester+'</td>';
-                html+='<td>'+(c.special_tags||[]).map(t=>'<span class="badge badge-es" style="font-size:8px">'+t+'</span>').join(' ')+'</td>';
                 html+='<td>'+c.planned_hours+'</td><td>'+c.attended_lectures+'/'+c.total_scheduled_lectures+'</td>';
                 html+='<td style="color:#fbbf24;font-weight:700">'+c.attended_hours+'</td>';
                 html+='<td>'+pct.toFixed(1)+'%'+pctBar(pct)+'</td></tr>';

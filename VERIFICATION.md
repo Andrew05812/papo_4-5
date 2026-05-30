@@ -22,10 +22,10 @@ docker compose up -d
 
 Проверить что все 6 коннекторов RUNNING:
 ```powershell
-curl -s http://localhost:8083/connectors
+curl.exe -s http://localhost:8083/connectors
 # Должно быть: ["redis-sink","mongodb-sink-hierarchy","debezium-postgres-source","neo4j-sink","elasticsearch-sink","mongodb-sink-flat"]
 
-curl -s http://localhost:8083/connectors/debezium-postgres-source/status | python -c "import sys,json; d=json.load(sys.stdin); print(d['connector']['state'])"
+curl.exe -s http://localhost:8083/connectors/debezium-postgres-source/status | python -c "import sys,json; d=json.load(sys.stdin); print(d['connector']['state'])"
 # Должно быть: RUNNING
 ```
 
@@ -36,7 +36,7 @@ docker exec postgres psql -U postgres -d university -c "UPDATE university SET na
 
 Генерация данных (если PostgreSQL пуст):
 ```powershell
-curl -s -X POST http://localhost:8010/generate
+curl.exe -s -X POST http://localhost:8010/generate
 # Генератор заполняет ТОЛЬКО PostgreSQL, остальные БД заполняются через CDC
 ```
 
@@ -48,11 +48,11 @@ curl -s -X POST http://localhost:8010/generate
 docker ps --format "table {{.Names}}\t{{.Status}}"
 ```
 
-Должно быть **20 контейнеров**, все Up/Healthy:
+Должно быть **19 контейнеров**, все Up/Healthy:
 zookeeper, broker, schema-registry, kafka-connect, control-center,
 postgres, generator, elasticsearch, redis, neo4j, mongodb,
-redis-cdc-delete, telegraf, influxdb, grafana,
-lab1, lab2, lab3, nginx, api-gateway
+telegraf, influxdb, grafana, lab1, lab2, lab3, nginx, api-gateway
+(redis-cdc-delete удалён — Delete теперь через DeletingCdcHandler SMT)
 
 ---
 
@@ -103,13 +103,13 @@ docker ps --format "{{.Names}} {{.Status}}" | Select-String "zookeeper|broker|sc
 
 ### 3.3 Debezium Source Connector — RUNNING
 ```powershell
-curl -s http://localhost:8083/connectors/debezium-postgres-source/status | python -c "import sys,json; d=json.load(sys.stdin); print(d['connector']['state'], d['tasks'][0]['state'])"
+curl.exe -s http://localhost:8083/connectors/debezium-postgres-source/status | python -c "import sys,json; d=json.load(sys.stdin); print(d['connector']['state'], d['tasks'][0]['state'])"
 ```
 Должно быть: **RUNNING RUNNING**
 
 ### 3.4 Конфиг Debezium: Initial Snapshot, pgoutput, publication=pub
 ```powershell
-curl -s http://localhost:8083/connectors/debezium-postgres-source/config | python -c "import sys,json; d=json.load(sys.stdin); print('snapshot.mode:', d.get('snapshot.mode')); print('plugin.name:', d.get('plugin.name')); print('publication.name:', d.get('publication.name'))"
+curl.exe -s http://localhost:8083/connectors/debezium-postgres-source/config | python -c "import sys,json; d=json.load(sys.stdin); print('snapshot.mode:', d.get('snapshot.mode')); print('plugin.name:', d.get('plugin.name')); print('publication.name:', d.get('publication.name'))"
 ```
 Должно быть: snapshot.mode=**initial**, plugin.name=**pgoutput**, publication.name=**pub**
 
@@ -135,15 +135,15 @@ docker inspect elasticsearch --format "{{.Config.Image}}"
 ```
 Должно быть: docker.elastic.co/elasticsearch/elasticsearch:**8.12.0** (стандартный образ, не кастомный)
 
-### 4.2 ES Sink Connector — ВСЕ 12 топиков из PostgreSQL
+### 4.2 ES Sink Connector — ВСЕ 12 топиков + ElasticsearchCdcHandler для DELETE
 ```powershell
-curl -s http://localhost:8083/connectors/elasticsearch-sink/config | python -c "import sys,json; d=json.load(sys.stdin); topics=d.get('topics','').split(','); print(len(topics),'topics'); print('behavior.on.null.values:', d.get('behavior.on.null.values'))"
+curl.exe -s http://localhost:8083/connectors/elasticsearch-sink/config | python -c "import sys,json; d=json.load(sys.stdin); topics=d.get('topics','').split(','); print(len(topics),'topics'); print('cdcDelete transform:', d.get('transforms.cdcDelete.type','').split('.')[-1])"
 ```
-Должно быть: **12 topics**, behavior.on.null.values=**delete** (поддержка Delete)
+Должно быть: **12 topics**, cdcDelete transform=**ElasticsearchCdcHandler** (Lenses elastic7 не имеет behavior.on.null.values, DELETE реализован через кастомный Transform)
 
 ### 4.3 12 индексов pg_* в ElasticSearch
 ```powershell
-curl -s http://localhost:9200/_cat/indices?v | Select-String "pg_"
+curl.exe -s http://localhost:9200/_cat/indices?v | Select-String "pg_"
 ```
 12 индексов: pg_university, pg_institute, pg_department, pg_speciality, pg_department_specialities, pg_lecture_course, pg_lecture, pg_lecture_material, pg_student_group, pg_student, pg_schedule, pg_attendance
 
@@ -154,7 +154,7 @@ docker exec postgres psql -U postgres -d university -c "INSERT INTO institute (i
 # Ждём 10 сек пока CDC дойдет:
 Start-Sleep 10
 # Проверяем в ES:
-curl -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
+curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
 ```
 Должно быть: hits: **1**
 
@@ -162,7 +162,7 @@ curl -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -
 ```powershell
 docker exec postgres psql -U postgres -d university -c "UPDATE institute SET name='ES_UPDATED' WHERE short_name='ETI'"
 Start-Sleep 10
-curl -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); h=d['hits']['hits']; print('name:', h[0]['_source']['name'] if len(h)>0 else 'NOT FOUND')"
+curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); h=d['hits']['hits']; print('name:', h[0]['_source']['name'] if len(h)>0 else 'NOT FOUND')"
 ```
 Должно быть: name: **ES_UPDATED**
 
@@ -170,7 +170,7 @@ curl -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -
 ```powershell
 docker exec postgres psql -U postgres -d university -c "DELETE FROM institute WHERE short_name='ETI'"
 Start-Sleep 10
-curl -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
+curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
 ```
 Должно быть: hits: **0** (документ физически удалён)
 
@@ -184,62 +184,56 @@ docker inspect redis --format "{{.Config.Image}}"
 ```
 Должно быть: redis:**7-alpine** (стандартный образ, не кастомный)
 
-### 5.2 Redis Sink Connector (stream-reactor) — ТОЛЬКО кешируемые таблицы
+### 5.2 Redis Sink Connector (stream-reactor + RedisHashCdcHandler SMT) — ТОЛЬКО кешируемые таблицы
 ```powershell
-curl -s http://localhost:8083/connectors/redis-sink/config | python -c "import sys,json; d=json.load(sys.stdin); print('connector.class:', d.get('connector.class','').split('.')[-1]); print('topics:', d.get('topics'))"
+curl.exe -s http://localhost:8083/connectors/redis-sink/config | python -c "import sys,json; d=json.load(sys.stdin); print('connector.class:', d.get('connector.class','').split('.')[-1]); print('topics:', d.get('topics')); print('transform:', d.get('transforms.redisHash.type','').split('.')[-1])"
 ```
-Должно быть: connector.class=**RedisSinkConnector**, topics=**university.public.student,university.public.student_group** (только 2 кешируемые таблицы)
+Должно быть: connector.class=**RedisSinkConnector**, topics=**university.public.student,university.public.student_group** (только 2 кешируемые таблицы), transform=**RedisHashCdcHandler**
 
-### 5.3 Данные в Redis (только student + student_group)
+### 5.3 Данные в Redis Hash (только student + student_group)
 ```powershell
-docker exec redis redis-cli KEYS "student-*" | Measure-Object -Line      # ~2000+ ключей
-docker exec redis redis-cli KEYS "student_group-*" | Measure-Object -Line # ~100+ ключей
-docker exec redis redis-cli KEYS "*" | Measure-Object -Line               # только student-* + student_group-*
+docker exec redis redis-cli KEYS "student:*" | Measure-Object -Line      # ~2000+ ключей
+docker exec redis redis-cli KEYS "student_group:*" | Measure-Object -Line # ~100+ ключей
+docker exec redis redis-cli KEYS "*" | Measure-Object -Line               # только student:* + student_group:*
 ```
-НЕ должно быть ключей других таблиц — только student-* и student_group-*
+НЕ должно быть ключей других таблиц — только student:* и student_group:*
 
-### 5.4 Формат данных в Redis (stream-reactor записывает JSON-строки)
+### 5.4 Формат данных в Redis — HASH (UPSERT INTO student: = HSET)
 ```powershell
 # Получить первый попавшийся ключ студента:
-$key = (docker exec redis redis-cli KEYS "student-*")[0]
-docker exec redis redis-cli GET $key
+$key = (docker exec redis redis-cli KEYS "student:*")[0]
+docker exec redis redis-cli HGETALL $key
 ```
-Должен вернуться JSON с полями записи + поле `__deleted: "false"`
+Должны быть поля хэша: id, first_name, last_name, patronymic, email, phone, student_card_number, status, enrollment_date, group_id
 
-### 5.5 CRUD — Create (INSERT в PG → ключ появляется в Redis)
+### 5.5 CRUD — Create (INSERT в PG → hash появляется в Redis)
 ```powershell
 docker exec postgres psql -U postgres -d university -c "INSERT INTO student_group (id, name, speciality_id, enrollment_year, curator) VALUES ('f1111111-0000-0000-0000-000000000001', 'REDIS_TEST_GRP', (SELECT id FROM speciality LIMIT 1), 2025, 'Test Curator')"
 Start-Sleep 10
-docker exec redis redis-cli GET "student_group-f1111111-0000-0000-0000-000000000001"
+docker exec redis redis-cli HGETALL "student_group:f1111111-0000-0000-0000-000000000001"
 ```
-Должен вернуться JSON с name=**"REDIS_TEST_GRP"**
+Должен вернуться hash с полем name=**"REDIS_TEST_GRP"**
 
-### 5.6 CRUD — Update (UPDATE в PG → значение обновляется в Redis)
+### 5.6 CRUD — Update (UPDATE в PG → hash обновляется в Redis)
 ```powershell
 docker exec postgres psql -U postgres -d university -c "UPDATE student_group SET name='REDIS_UPDATED' WHERE id='f1111111-0000-0000-0000-000000000001'"
 Start-Sleep 10
-docker exec redis redis-cli GET "student_group-f1111111-0000-0000-0000-000000000001"
+docker exec redis redis-cli HGET "student_group:f1111111-0000-0000-0000-000000000001" name
 ```
-Должно быть name=**"REDIS_UPDATED"**
+Должно быть: **"REDIS_UPDATED"**
 
-### 5.7 CRUD — Delete (ключ ФИЗИЧЕСКИ удаляется из Redis)
-**Важно**: stream-reactor НЕ умеет физически удалять ключи (ставит `__deleted=true` — soft delete).
-Для физического Delete добавлен **redis-cdc-delete** consumer (Python):
-он слушает те же Kafka-топики и при op='d' делает `DEL` в Redis с задержкой 3 сек
-(чтобы stream-reactor успел обработать первым).
+### 5.7 CRUD — Delete (ключ ФИЗИЧЕСКИ удаляется из Redis через RedisHashCdcHandler)
+**Важно**: stream-reactor не умеет физически удалять ключи и не поддерживает HSET.
+Для HSET + физического Delete добавлен кастомный Kafka Connect Transformation **RedisHashCdcHandler**
+(Java-класс внутри redis-cdc-handler.jar): при получении tombstone (value=null) он делает `jedis.del()` в Redis,
+при обычной записи — `jedis.hset()` (HSET hash). Transform возвращает null, чтобы stream-reactor не дублировал.
 
 ```powershell
 docker exec postgres psql -U postgres -d university -c "DELETE FROM student_group WHERE id='f1111111-0000-0000-0000-000000000001'"
-Start-Sleep 20   # Ждём: Debezium → Kafka → stream-reactor(soft delete) → redis-cdc-delete(physical DEL)
-docker exec redis redis-cli EXISTS "student_group-f1111111-0000-0000-0000-000000000001"
+Start-Sleep 15
+docker exec redis redis-cli EXISTS "student_group:f1111111-0000-0000-0000-000000000001"
 ```
 Должно быть: **0** (ключ ФИЗИЧЕСКИ удалён)
-
-### 5.8 redis-cdc-delete consumer работает
-```powershell
-docker logs redis-cdc-delete --tail 5
-```
-Должно быть: "Consumer запущен, ожидание DELETE-событий..." и при DELETE — "DEL student-..."
 
 ---
 
@@ -253,7 +247,7 @@ docker inspect neo4j --format "{{.Config.Image}}"
 
 ### 6.2 Neo4j Sink Connector — ТОЛЬКО таблицы графовых связей (11, БЕЗ lecture_material)
 ```powershell
-curl -s http://localhost:8083/connectors/neo4j-sink/config | python -c "import sys,json; d=json.load(sys.stdin); topics=d.get('topics','').split(','); print(len(topics),'topics'); print('has lecture_material:','lecture_material' in d.get('topics',''))"
+curl.exe -s http://localhost:8083/connectors/neo4j-sink/config | python -c "import sys,json; d=json.load(sys.stdin); topics=d.get('topics','').split(','); print(len(topics),'topics'); print('has lecture_material:','lecture_material' in d.get('topics',''))"
 ```
 Должно быть: **11 topics**, has lecture_material: **False**
 
@@ -307,7 +301,7 @@ type mongodb\Dockerfile
 
 ### 7.2 MongoDB Sink Connector (flat) — ВСЕ 12 топиков, встроенный PostgresHandler
 ```powershell
-curl -s http://localhost:8083/connectors/mongodb-sink-flat/config | python -c "import sys,json; d=json.load(sys.stdin); print('handler:', d.get('change.data.capture.handler','').split('.')[-1]); print('database:', d.get('database')); print('collection:', d.get('collection')); print('delete.on.null.values:', d.get('delete.on.null.values'))"
+curl.exe -s http://localhost:8083/connectors/mongodb-sink-flat/config | python -c "import sys,json; d=json.load(sys.stdin); print('handler:', d.get('change.data.capture.handler','').split('.')[-1]); print('database:', d.get('database')); print('collection:', d.get('collection')); print('delete.on.null.values:', d.get('delete.on.null.values'))"
 ```
 Должно быть: handler=**PostgresHandler**, database=**university_cdc**, collection=**flat_data**, delete.on.null.values=**true**
 
@@ -353,7 +347,7 @@ docker exec mongodb mongosh -u mongo -p password12345 --authenticationDatabase a
 
 ### 8.1 Конфигурация: использует наш Java-класс (НЕ встроенный PostgresHandler)
 ```powershell
-curl -s http://localhost:8083/connectors/mongodb-sink-hierarchy/config | python -c "import sys,json; d=json.load(sys.stdin); print('handler:', d.get('change.data.capture.handler')); print('topics:', d.get('topics'))"
+curl.exe -s http://localhost:8083/connectors/mongodb-sink-hierarchy/config | python -c "import sys,json; d=json.load(sys.stdin); print('handler:', d.get('change.data.capture.handler')); print('topics:', d.get('topics'))"
 ```
 Должно быть: handler=**com.example.UniversityHierarchyCdcHandler**, 5 topics (university, institute, department, speciality, department_specialities)
 
@@ -418,8 +412,8 @@ docker exec mongodb mongosh -u mongo -p password12345 --authenticationDatabase a
 
 ```powershell
 docker logs telegraf --tail 3                    # Telegraf читает из Kafka
-curl -s http://localhost:8086/health             # InfluxDB ready → {"status":"pass"}
-curl -s http://localhost:3000/api/health         # Grafana → {"database":"ok"}
+curl.exe -s http://localhost:8086/health             # InfluxDB ready → {"status":"pass"}
+curl.exe -s http://localhost:3000/api/health         # Grafana → {"database":"ok"}
 # Grafana UI: http://localhost:3000 (admin/admin)
 # Control Center: http://localhost:9021
 ```
@@ -465,23 +459,23 @@ docker ps --format "{{.Names}}" | Select-String "lab"
 
 ### Lab1: lectures ES-индекс создан из PG при старте
 ```powershell
-curl -s http://localhost:9200/lectures/_count
+curl.exe -s http://localhost:9200/lectures/_count
 ```
 Должно быть: count > 0
 
 ### Lab1 + Lab2 + Lab3: API отвечает
 ```powershell
 # Получить JWT-токен:
-$token = (curl -s -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin123"}' | ConvertFrom-Json).access_token
+$token = (curl.exe -s -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin123"}' | ConvertFrom-Json).access_token
 
 # ЛР1 — минимальный % посещения по термину:
-curl -s "http://localhost:8000/attendance/low?term=programming&start_date=2025-09-01&end_date=2026-06-01" -H "Authorization: Bearer $token"
+curl.exe -s "http://localhost:8000/attendance/low?term=programming&start_date=2025-09-01&end_date=2026-06-01" -H "Authorization: Bearer $token"
 
 # ЛР2 — ёмкость аудитории по семестру/оборудованию:
-curl -s "http://localhost:8000/schedule/capacity?semester=1&year=2026&equipment=" -H "Authorization: Bearer $token"
+curl.exe -s "http://localhost:8000/schedule/capacity?semester=1&year=2026&equipment=" -H "Authorization: Bearer $token"
 
 # ЛР3 — отчёт по группе:
-curl -s "http://localhost:8000/hours/report?group_name=Group-001" -H "Authorization: Bearer $token"
+curl.exe -s "http://localhost:8000/hours/report?group_name=Group-001" -H "Authorization: Bearer $token"
 ```
 Все должны вернуть JSON с результатом
 
@@ -496,12 +490,12 @@ curl -s "http://localhost:8000/hours/report?group_name=Group-001" -H "Authorizat
 | 3 | wal_level=logical | `docker exec postgres psql -U postgres -d university -c "SHOW wal_level"` |
 | 4 | 12 таблиц схемы | `docker exec postgres psql -U postgres -d university -c "\dt"` |
 | 5 | 12 Kafka топиков (1 на таблицу) | `docker exec broker kafka-topics --list --bootstrap-server broker:29092 \| grep university` |
-| 6 | 6 коннекторов RUNNING | `curl -s http://localhost:8083/connectors` |
-| 7 | ES: 12 pg_* индексов + CRUD | `curl -s http://localhost:9200/_cat/indices?v \| grep pg_` |
-| 8 | Redis: только student + student_group | `docker exec redis redis-cli KEYS "*"` |
+| 6 | 6 коннекторов RUNNING | `curl.exe -s http://localhost:8083/connectors` |
+| 7 | ES: 12 pg_* индексов + CRUD | `curl.exe -s http://localhost:9200/_cat/indices?v \| grep pg_` |
+| 8 | Redis: student:* + student_group:* (HSET hash) | `docker exec redis redis-cli HGETALL student:UUID` |
 | 9 | Neo4j: узлы + связи + НЕТ LectureMaterial | `docker exec neo4j cypher-shell -u neo4j -p password12345 "CALL db.labels()"` |
-| 10 | MongoDB flat: PostgresHandler | `curl -s http://localhost:8083/connectors/mongodb-sink-flat/config` |
-| 11 | MongoDB hierarchy: CdcHandler | `curl -s http://localhost:8083/connectors/mongodb-sink-hierarchy/config` |
+| 10 | MongoDB flat: PostgresHandler | `curl.exe -s http://localhost:8083/connectors/mongodb-sink-flat/config` |
+| 11 | MongoDB hierarchy: CdcHandler | `curl.exe -s http://localhost:8083/connectors/mongodb-sink-hierarchy/config` |
 | 12 | Иерархический документ | `docker exec mongodb mongosh ... --eval "db.getSiblingDB('university').hierarchy.findOne()"` |
 | 13 | CdcHandler встроен в JAR | `docker exec kafka-connect bash -c "jar tf .../mongodb-connector.jar \| grep University"` |
 | 14 | MongoDB СВОЙ контейнер | `type mongodb\Dockerfile` |

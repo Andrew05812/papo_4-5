@@ -206,10 +206,10 @@ LECTURE_CONTENT_TEMPLATES = [
     "Практикум по {topic}. Пошаговое выполнение заданий. Типичные ошибки и способы их устранения. Рекомендации по улучшению.",
 ]
 
-# Теги специальных дисциплин для фильтрации в ЛР3
-SPECIAL_TAGS = [
-    "спецдисциплина", "кафедральная_дисциплина", "профильная_дисциплина",
-    "дисциплина_кафедры", "специализация"
+# Теги оборудования для ЛР2 (фильтрация по equipment в ES)
+EQUIPMENT_TAGS = [
+    "проектор", "компьютер", "интерактивная_доска", "микрофон",
+    "видеоконференция", "лабораторное_оборудование"
 ]
 
 # Номера аудиторий
@@ -347,7 +347,7 @@ def generate_data(student_count=1000):
         course_to_idx = {cid: ci for ci, cid in enumerate(course_ids)}
         num_lectures_per_course = 10
         lecture_data = []
-        # Генерация лекций (10 лекций на курс, 30% получают спец. тег, 40% — требование оборудования)
+        # Генерация лекций (10 лекций на курс, 50% — тег курса, 40% — требование оборудования)
         for ci, cid in enumerate(course_ids):
             course_name = COURSE_NAMES[ci % len(COURSE_NAMES)]
             for li in range(num_lectures_per_course):
@@ -359,10 +359,10 @@ def generate_data(student_count=1000):
                 order_number = li + 1
                 dur = 90 if ltype == "лекция" else 90
                 tags = []
-                if random.random() < 0.3:
-                    tags.append(random.choice(SPECIAL_TAGS))
                 if random.random() < 0.5:
                     tags.append(course_name.lower().replace(" ", "_"))
+                if random.random() < 0.4:
+                    tags.append(random.choice(EQUIPMENT_TAGS))
                 eq = random.choice(COMPUTER_TYPES) if random.random() < 0.4 else None
                 lecture_data.append((lid, cid, title, annotation, ltype, order_number, dur, eq, tags))
 

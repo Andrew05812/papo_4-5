@@ -288,37 +288,16 @@ services:
       retries: 10
 
   # ==============================================================================
-  # REDIS CDC HANDLER — удалён (конфликтовал с stream-reactor Sink Connector)
+  # Redis CDC — заменён на RedisHashCdcHandler (Kafka Connect SMT)
   #
-  # Stream-reactor Redis Sink Connector корректно обрабатывает Create/Update,
-  # но НЕ умеет физически удалять ключи (ставит __deleted=true — soft delete).
-  # Для физического Delete используется redis-cdc-delete consumer ниже.
+  # Раньше: Python consumer redis-cdc-delete для DEL + stream-reactor для SET (JSON string).
+  # Теперь: кастомный Kafka Connect Transformation RedisHashCdcHandler (Java-класс в redis-cdc-handler.jar):
+  #   - при обычной записи: jedis.hset() → Redis Hash (HSET), Lab1/Lab3 используют HGETALL
+  #   - при tombstone (value=null): jedis.del() → физический DELETE ключа
+  #   - возвращает null, чтобы stream-reactor не дублировал запись
+  # stream-reactor 6.0.2 не поддерживает HSET и не умеет удалять ключи —
+  # поэтому RedisHashCdcHandler полностью заменяет его функциональность для student/student_group.
   # ==============================================================================
-
-  # ==============================================================================
-  # Redis CDC Delete Consumer — дополнение к stream-reactor Redis Sink
-  #
-  # Зачем: stream-reactor НЕ умеет физически удалять ключи из Redis при DELETE
-  #   из PostgreSQL. Он ставит __deleted="true" в JSON-значении (soft delete).
-  #   Но задание требует проверки Delete — ключ должен ФИЗИЧЕСКИ исчезнуть.
-  #
-  # Этот consumer слушает Kafka-топики student/student_group, и при получении
-  # DELETE-события (op='d') делает реальный DEL key в Redis.
-  # Формат ключа совпадает с stream-reactor: student-{uuid}, student_group-{uuid}
-  # ==============================================================================
-  redis-cdc-delete:
-    build:
-      context: .
-      dockerfile: redis-cdc-delete/Dockerfile
-    container_name: redis-cdc-delete
-    depends_on:
-      - broker
-      - redis
-    environment:
-      KAFKA_BOOTSTRAP_SERVERS: broker:29092
-      SCHEMA_REGISTRY_URL: http://schema-registry:8081
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
 
   # ==============================================================================
   # MONITORING — Telegraf → InfluxDB 2 → Grafana

@@ -17,9 +17,8 @@ public class DeletingCdcHandler<R extends ConnectRecord<R>> implements Transform
 
     private static final Logger log = LoggerFactory.getLogger(DeletingCdcHandler.class);
     private JedisPool jedisPool;
-    private final Map<String, String> idToPk = new ConcurrentHashMap<>();
+    private final Map<String, String> idToRedisKey = new ConcurrentHashMap<>();
     private String pkField;
-    private String keyPrefix;
 
     private static String getStr(Map<String, ?> configs, String key, String def) {
         Object v = configs.get(key);
@@ -29,7 +28,6 @@ public class DeletingCdcHandler<R extends ConnectRecord<R>> implements Transform
     @Override
     public void configure(Map<String, ?> configs) {
         pkField = getStr(configs, "pk.field", "id");
-        keyPrefix = getStr(configs, "key.prefix", "student:");
         String redisHost = getStr(configs, "redis.host", "redis");
         int redisPort = Integer.parseInt(getStr(configs, "redis.port", "6379"));
         JedisPoolConfig poolConfig = new JedisPoolConfig();
@@ -37,17 +35,22 @@ public class DeletingCdcHandler<R extends ConnectRecord<R>> implements Transform
         poolConfig.setMaxIdle(5);
         poolConfig.setMinIdle(1);
         jedisPool = new JedisPool(poolConfig, redisHost, redisPort, 2000);
-        log.info("DeletingCdcHandler initialized (Redis at {}:{}, pkField={}, keyPrefix={})", redisHost, redisPort, pkField, keyPrefix);
+        log.info("DeletingCdcHandler initialized (Redis at {}:{}, pkField={})", redisHost, redisPort, pkField);
+    }
+
+    private String prefixFromTopic(String topic) {
+        int dot = topic.lastIndexOf('.');
+        return (dot >= 0 ? topic.substring(dot + 1) : topic) + ":";
     }
 
     @Override
     public R apply(R record) {
+        String prefix = prefixFromTopic(record.topic());
         if (record.value() == null) {
             String id = extractIdFromKey(record.key());
             if (id != null) {
-                String pkValue = idToPk.remove(id);
-                if (pkValue != null) {
-                    String redisKey = keyPrefix + pkValue;
+                String redisKey = idToRedisKey.remove(id);
+                if (redisKey != null) {
                     try (Jedis jedis = jedisPool.getResource()) {
                         jedis.del(redisKey);
                         log.info("Deleted key '{}' from Redis", redisKey);
@@ -61,7 +64,7 @@ public class DeletingCdcHandler<R extends ConnectRecord<R>> implements Transform
         String pkValue = extractField(record.value(), pkField);
         String id = extractField(record.value(), "id");
         if (id != null && pkValue != null) {
-            idToPk.put(id, pkValue);
+            idToRedisKey.put(id, prefix + pkValue);
         }
         return record;
     }
@@ -97,7 +100,6 @@ public class DeletingCdcHandler<R extends ConnectRecord<R>> implements Transform
     public ConfigDef config() {
         return new ConfigDef()
                 .define("pk.field", ConfigDef.Type.STRING, "id", ConfigDef.Importance.MEDIUM, "PK field for Redis key suffix")
-                .define("key.prefix", ConfigDef.Type.STRING, "student:", ConfigDef.Importance.MEDIUM, "Redis key prefix")
                 .define("redis.host", ConfigDef.Type.STRING, "redis", ConfigDef.Importance.HIGH, "Redis host")
                 .define("redis.port", ConfigDef.Type.STRING, "6379", ConfigDef.Importance.MEDIUM, "Redis port");
     }
