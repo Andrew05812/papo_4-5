@@ -35,14 +35,12 @@ RUN mkdir -p /usr/share/confluent-hub-components/lensesio-kafka-connect-redis/li
     rm -rf /tmp/redis-extracted /tmp/redis-connector.zip
 COPY redis-cdc-handler.jar /usr/share/confluent-hub-components/lensesio-kafka-connect-redis/lib/
 
-# --- 3. Neo4j Sink Connector 5.3.1 ---
+# --- 3. Neo4j Sink Connector 5.0.12 ---
 COPY neo4j-connect.zip /tmp/neo4j-connect.zip
-RUN mkdir -p /usr/share/confluent-hub-components/neo4j-kafka-connect-5.3.1 && \
-    mkdir -p /tmp/neo4j-extracted && \
-    cd /tmp/neo4j-extracted && \
-    jar xf /tmp/neo4j-connect.zip && \
-    cp -r /tmp/neo4j-extracted/neo4j-kafka-connect-5.3.1/* /usr/share/confluent-hub-components/neo4j-kafka-connect-5.3.1/ && \
-    rm -rf /tmp/neo4j-extracted /tmp/neo4j-connect.zip
+RUN mkdir -p /usr/share/confluent-hub-components/neo4j-kafka-connect/lib && \
+    cd /tmp && jar xf /tmp/neo4j-connect.zip && \
+    cp /tmp/*.jar /usr/share/confluent-hub-components/neo4j-kafka-connect/lib/ && \
+    rm -rf /tmp/neo4j-connect.zip /tmp/META-INF
 
 # --- 4. MongoDB Sink Connector (со встроенным CdcHandler) ---
 COPY mongodb-connector.jar /tmp/mongodb-connector.jar
