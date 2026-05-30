@@ -12,7 +12,7 @@
   "slot.name": "debezium_slot",
   "schema.include.list": "public",
   "table.include.list": "public.university,public.institute,public.department,public.speciality,public.department_specialities,public.lecture_course,public.lecture,public.lecture_material,public.student_group,public.student,public.schedule,public.attendance",
-  "snapshot.mode": "initial",
+  "snapshot.mode": "always",
   "time.precision.mode": "adaptive",
   "decimal.handling.mode": "string",
   "interval.handling.mode": "string",

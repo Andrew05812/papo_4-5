@@ -14,6 +14,14 @@ docker compose up -d
 
 Ждать ~2 минуты пока все контейнеры станут healthy.
 
+**Важно**: после `docker compose down -v` внутренние Kafka-топики создаются с неправильным cleanup.policy. Исправляем:
+```powershell
+docker exec broker kafka-configs --bootstrap-server broker:29092 --entity-type topics --entity-name _connect-offsets --alter --add-config cleanup.policy=compact
+docker exec broker kafka-configs --bootstrap-server broker:29092 --entity-type topics --entity-name _connect-configs --alter --add-config cleanup.policy=compact
+docker exec broker kafka-configs --bootstrap-server broker:29092 --entity-type topics --entity-name _connect-status --alter --add-config cleanup.policy=compact
+docker compose restart kafka-connect
+```
+
 Регистрация коннекторов (выполнять ПОСЛЕ того как kafka-connect стал healthy):
 ```powershell
 python -c "
@@ -137,7 +145,7 @@ curl.exe -s http://localhost:8083/connectors/debezium-postgres-source/status | p
 ```powershell
 curl.exe -s http://localhost:8083/connectors/debezium-postgres-source/config | python -c "import sys,json; d=json.load(sys.stdin); print('snapshot.mode:', d.get('snapshot.mode')); print('plugin.name:', d.get('plugin.name')); print('publication.name:', d.get('publication.name'))"
 ```
-Должно быть: snapshot.mode=**initial**, plugin.name=**pgoutput**, publication.name=**pub**
+Должно быть: snapshot.mode=**always**, plugin.name=**pgoutput**, publication.name=**pub**
 
 ### 3.5 12 топиков (1 топик на таблицу)
 ```powershell
@@ -161,11 +169,11 @@ docker inspect elasticsearch --format "{{.Config.Image}}"
 ```
 Должно быть: docker.elastic.co/elasticsearch/elasticsearch:**8.12.0** (стандартный образ, не кастомный)
 
-### 4.2 ES Sink Connector — ВСЕ 12 топиков + ElasticsearchCdcHandler для DELETE
+### 4.2 ES Sink Connector — ВСЕ 12 топиков + ElasticsearchCdcHandler для ВСЕХ операций
 ```powershell
 curl.exe -s http://localhost:8083/connectors/elasticsearch-sink/config | python -c "import sys,json; d=json.load(sys.stdin); topics=d.get('topics','').split(','); print(len(topics),'topics'); print('cdcDelete transform:', d.get('transforms.cdcDelete.type','').split('.')[-1])"
 ```
-Должно быть: **12 topics**, cdcDelete transform=**ElasticsearchCdcHandler** (Lenses elastic7 не имеет behavior.on.null.values, DELETE реализован через кастомный Transform)
+Должно быть: **12 topics**, cdcDelete transform=**ElasticsearchCdcHandler** (кастомный Transform: обрабатывает INSERT/UPDATE через HTTP PUT с UUID _id, DELETE через HTTP DELETE при tombstone; возвращает null чтобы коннектор не дублировал записи)
 
 ### 4.3 12 индексов university.public.* в ElasticSearch
 ```powershell
@@ -316,7 +324,7 @@ docker exec neo4j cypher-shell -u neo4j -p password12345 "MATCH (s:Speciality {c
 
 ---
 
-## 7. MongoDB Sink — flat (Лаб 5, шаг 2, PostgresHandler)
+## 7. MongoDB Sink — flat (Лаб 5, шаг 2, ExtractNewRecordState)
 
 ### 7.1 Docker Compose секция для MongoDB — СВОЙ контейнер (не заводской!)
 ```powershell
@@ -325,23 +333,26 @@ type mongodb\Dockerfile
 Должен быть: `FROM mongo:7` + `LABEL` (доказывает что контейнер свой, не заводской)
 (по заданию: Redis/ES/Neo4j — заводские, а у MongoDB — свой)
 
-### 7.2 MongoDB Sink Connector (flat) — ВСЕ 12 топиков, встроенный PostgresHandler
+### 7.2 MongoDB Sink Connector (flat) — ВСЕ 12 топиков, ExtractNewRecordState transform
+**Важно**: встроенный PostgresHandler молча игнорирует все записи (LAG=0 но данных нет).
+Вместо него используется `ExtractNewRecordState` unwrap-трансформация Debezium.
+
 ```powershell
-curl.exe -s http://localhost:8083/connectors/mongodb-sink-flat/config | python -c "import sys,json; d=json.load(sys.stdin); print('handler:', d.get('change.data.capture.handler','').split('.')[-1]); print('database:', d.get('database')); print('collection:', d.get('collection')); print('delete.on.null.values:', d.get('delete.on.null.values'))"
+curl.exe -s http://localhost:8083/connectors/mongodb-sink-flat/config | python -c "import sys,json; d=json.load(sys.stdin); print('unwrap type:', d.get('transforms.unwrap.type','').split('.')[-1]); print('database:', d.get('database')); print('collection:', d.get('collection')); print('add.fields:', d.get('transforms.unwrap.add.fields'))"
 ```
-Должно быть: handler=**PostgresHandler**, database=**university_cdc**, collection=**flat_data**, delete.on.null.values=**true**
+Должно быть: unwrap type=**ExtractNewRecordState**, database=**university_cdc**, collection=**flat_data**, add.fields=**op,table**
 
 ### 7.3 Количество документов в flat_data
 ```powershell
 docker exec mongodb mongosh -u mongo -p password12345 --authenticationDatabase admin --quiet --eval "db.getSiblingDB('university_cdc').flat_data.countDocuments()"
 ```
-Должно быть: ~138000+ документов
+Должно быть: ~10000+ документов (каждая строка каждой таблицы = 1 документ)
 
-### 7.4 Пример плоского документа (без Debezium envelope)
+### 7.4 Пример плоского документа (unwrap из Debezium envelope)
 ```powershell
-docker exec mongodb mongosh -u mongo -p password12345 --authenticationDatabase admin --quiet --eval "db.getSiblingDB('university_cdc').flat_data.findOne({name:{$exists:true}}, {_id:0, name:1, short_name:1})"
+docker exec mongodb mongosh -u mongo -p password12345 --authenticationDatabase admin --quiet --eval "db.getSiblingDB('university_cdc').flat_data.findOne({name:{$exists:true}}, {name:1, short_name:1, __op:1, __table:1, _id:0})"
 ```
-Должен быть документ с полями таблицы (name, short_name, ...), без "payload"/"op" полей
+Должен быть документ с полями таблицы + мета-поля `__op` (операция) и `__table` (имя таблицы), _id = {"id": "UUID"}
 
 ### 7.5 CRUD — Create
 ```powershell
@@ -489,19 +500,27 @@ curl.exe -s http://localhost:9200/lectures/_count
 ```
 Должно быть: count > 0
 
+Если count = 0 (при старте PG был пуст) — пересоздать:
+```powershell
+docker exec lab1 python -c "from elasticsearch import Elasticsearch; es = Elasticsearch(['http://elasticsearch:9200'], basic_auth=('elastic','elastic_pass123')); try: es.indices.delete(index='lectures'); except: pass; from app import ensure_lectures_index; ensure_lectures_index()"
+```
+
 ### Lab1 + Lab2 + Lab3: API отвечает
 ```powershell
 # Получить JWT-токен:
 $token = (curl.exe -s -X POST http://localhost:8000/auth/login -H "Content-Type: application/json" -d '{"username":"admin","password":"admin123"}' | ConvertFrom-Json).access_token
 
-# ЛР1 — минимальный % посещения по термину:
-curl.exe -s "http://localhost:8000/attendance/low?term=programming&start_date=2025-09-01&end_date=2026-06-01" -H "Authorization: Bearer $token"
+# ЛР1 — минимальный % посещения по термину (кириллицу кодируем):
+$term = [uri]::EscapeDataString("вероятностей")
+curl.exe -s "http://localhost:8000/attendance/low?term=$term&start_date=2025-09-01&end_date=2026-06-01" -H "Authorization: Bearer $token"
 
 # ЛР2 — ёмкость аудитории по семестру/оборудованию:
-curl.exe -s "http://localhost:8000/schedule/capacity?semester=1&year=2026&equipment=" -H "Authorization: Bearer $token"
+curl.exe -s "http://localhost:8000/schedule/capacity?semester=1&year=2025&equipment=" -H "Authorization: Bearer $token"
 
 # ЛР3 — отчёт по группе:
-curl.exe -s "http://localhost:8000/hours/report?group_name=Group-001" -H "Authorization: Bearer $token"
+curl.exe -s "http://localhost:8000/hours/report?group_name=Группа-001-2025" -H "Authorization: Bearer $token"
+# Примечание: имя группы зависит от генерации; посмотреть реальные имена:
+# docker exec neo4j cypher-shell -u neo4j -p password12345 "MATCH (g:StudentGroup) RETURN g.name LIMIT 5"
 ```
 Все должны вернуть JSON с результатом
 
@@ -520,7 +539,7 @@ curl.exe -s "http://localhost:8000/hours/report?group_name=Group-001" -H "Author
 | 7 | ES: 12 university.public.* индексов + CRUD | `curl.exe -s http://localhost:9200/_cat/indices?v \| grep university.public.` |
 | 8 | Redis: student:* + student_group:* (HSET hash) | `docker exec redis redis-cli HGETALL student:UUID` |
 | 9 | Neo4j: узлы + связи + НЕТ LectureMaterial | `docker exec neo4j cypher-shell -u neo4j -p password12345 "CALL db.labels()"` |
-| 10 | MongoDB flat: PostgresHandler | `curl.exe -s http://localhost:8083/connectors/mongodb-sink-flat/config` |
+| 10 | MongoDB flat: ExtractNewRecordState | `curl.exe -s http://localhost:8083/connectors/mongodb-sink-flat/config` |
 | 11 | MongoDB hierarchy: CdcHandler | `curl.exe -s http://localhost:8083/connectors/mongodb-sink-hierarchy/config` |
 | 12 | Иерархический документ | `docker exec mongodb mongosh ... --eval "db.getSiblingDB('university').hierarchy.findOne()"` |
 | 13 | CdcHandler встроен в JAR | `docker exec kafka-connect bash -c "jar tf .../mongodb-connector.jar \| grep University"` |

@@ -161,3 +161,4 @@ CREATE INDEX idx_lecture_course_semester_spec ON lecture_course (semester, speci
 -- PUBLICATION pub FOR ALL TABLES — публикует ВСЕ таблицы схемы public.
 -- ==============================================================================
 CREATE PUBLICATION pub FOR ALL TABLES;
+ALTER PUBLICATION pub SET (publish_via_partition_root = true);
