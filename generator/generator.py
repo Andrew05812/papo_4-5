@@ -263,7 +263,9 @@ def generate_data(student_count=1000):
 
     random.seed(42)
 
-    university_id = str(uuid.uuid4())
+    university_id_1 = str(uuid.uuid4())
+    university_id_2 = str(uuid.uuid4())
+    university_ids = [university_id_1, university_id_2]
     institute_ids = [str(uuid.uuid4()) for _ in INSTITUTES]
     department_ids = [str(uuid.uuid4()) for _ in DEPARTMENTS]
     speciality_ids = [str(uuid.uuid4()) for _ in SPECIALITIES]
@@ -279,17 +281,22 @@ def generate_data(student_count=1000):
     cur = pg.cursor()
 
     try:
-        # --- Вставка университета (корневая запись, 1 строка) ---
+        # --- Вставка 2 университетов ---
         cur.execute(
             "INSERT INTO university (id, name, short_name, address, founded_year) VALUES (%s, %s, %s, %s, %s)",
-            (university_id, "РТУ МИРЭА", "МИРЭА", "г. Москва, проспект Вернадского, 78", 1947)
+            (university_id_1, "РТУ МИРЭА", "МИРЭА", "г. Москва, проспект Вернадского, 78", 1947)
+        )
+        cur.execute(
+            "INSERT INTO university (id, name, short_name, address, founded_year) VALUES (%s, %s, %s, %s, %s)",
+            (university_id_2, "МГТУ им. Баумана", "МГТУ", "г. Москва, ул. Бауманская, 5", 1830)
         )
 
-        # --- Вставка институтов (5 строк, FK → university) ---
+        # --- Вставка институтов (3→МИРЭА, 2→МГТУ) ---
+        inst_univ_map = {0: 0, 1: 0, 2: 0, 3: 1, 4: 1}
         for i, inst in enumerate(INSTITUTES):
             cur.execute(
                 "INSERT INTO institute (id, university_id, name, short_name, dean) VALUES (%s, %s, %s, %s, %s)",
-                (institute_ids[i], university_id, inst["name"], inst["short"], inst["dean"])
+                (institute_ids[i], university_ids[inst_univ_map[i]], inst["name"], inst["short"], inst["dean"])
             )
 
         # --- Вставка кафедр (15 строк, FK → institute) ---
@@ -553,7 +560,7 @@ def generate_data(student_count=1000):
     logger.info("PostgreSQL data committed")
 
     counts = {
-        "university": 1,
+        "university": 2,
         "institutes": len(institute_ids),
         "departments": len(department_ids),
         "specialities": len(speciality_ids),
