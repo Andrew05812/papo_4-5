@@ -242,6 +242,7 @@ services:
       - "7687:7687"                      # Bolt-протокол (для драйверов)
     volumes:
       - neo4j_data:/data
+      - ./neo4j/init:/var/lib/neo4j/import
     healthcheck:
       test: ["CMD-SHELL", "cypher-shell -u neo4j -p password12345 'RETURN 1' || exit 1"]
       interval: 15s

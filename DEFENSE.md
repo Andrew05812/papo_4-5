@@ -39,7 +39,13 @@ curl.exe -s http://localhost:8083/ | Select-String "version"
 # Должен ответить — значит Kafka Connect запущен
 ```
 
+UNIQUE-constraints в Neo4j (предотвращают дубликаты при concurrent MERGE):
+
 ```powershell
+docker exec neo4j cypher-shell -u neo4j -p password12345 "CREATE CONSTRAINT IF NOT EXISTS FOR (n:University) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:Institute) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:Department) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:Speciality) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:LectureCourse) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:Lecture) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:StudentGroup) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:Student) REQUIRE n.id IS UNIQUE; CREATE CONSTRAINT IF NOT EXISTS FOR (n:Schedule) REQUIRE n.id IS UNIQUE"
+```
+
+Регистрация 6 коннекторов:
 python -c "
 import json, urllib.request, os, time
 url = 'http://localhost:8083/connectors'
@@ -90,7 +96,7 @@ curl.exe -s -X POST http://localhost:8010/generate
 
 Ждём ~30 секунд пока Debezium снимет snapshot и разнесёт по всем БД.
 
-Если MongoDB иерархия пуста — триггерим UPDATE на 5 таблиц:
+Если MongoDB иерархия пуста (CdcHandler не успел) — триггерим UPDATE:
 
 ```powershell
 docker exec postgres psql -U postgres -d university -c "UPDATE university SET name=name; UPDATE institute SET name=name; UPDATE department SET name=name; UPDATE speciality SET name=name; UPDATE department_specialities SET is_primary=is_primary"
@@ -112,8 +118,8 @@ docker exec postgres psql -U postgres -d university -c "SELECT count(*) FROM uni
 # 2 (два университета)
 
 docker exec postgres psql -U postgres -d university -c "SELECT id, name, short_name FROM university"
-# b3dc...|РТУ МИРЭА|...
-# df52...|РТУ МИРЭА|...
+# uuid...|РТУ МИРЭА|...
+# uuid...|МГТУ им. Баумана|...
 
 docker exec postgres psql -U postgres -d university -c "SELECT count(*) FROM student"
 # ~3000 студентов
@@ -152,7 +158,7 @@ docker exec redis redis-cli HGETALL $key
 
 ```powershell
 docker exec neo4j cypher-shell -u neo4j -p password12345 "MATCH (n) RETURN labels(n)[0] AS label, count(n) AS cnt ORDER BY label"
-# University: 2-3, Institute: 22, Department: 78, Speciality: 146, LectureCourse: 362, Lecture: 3600, StudentGroup: 134, Student: 3001, Schedule: 3960
+# University: 2, Institute: 5, Department: 15, Speciality: 30, LectureCourse: 120, Lecture: 1200, StudentGroup: 100, Student: 3000, Schedule: 3990
 # НЕТ LectureMaterial (11 топиков, не 12)
 ```
 
@@ -167,12 +173,12 @@ docker exec neo4j cypher-shell -u neo4j -p password12345 "MATCH (sp:Speciality)-
 # Специальности с is_primary=true (для ЛР3)
 ```
 
-### 3.5 MongoDB — flat (PostgresHandler) + hierarchy (CdcHandler)
+### 3.5 MongoDB — flat (ExtractNewRecordState) + hierarchy (CdcHandler)
 
 ```powershell
-# Flat — плоские документы всех таблиц:
+# Flat — плоские документы всех таблиц (upsert по ключу):
 docker exec mongodb mongosh -u mongo -p password12345 --authenticationDatabase admin --quiet --eval "db.getSiblingDB('university_cdc').flat_data.countDocuments()"
-# ~138000+ документов
+# ~10000+ документов (каждая строка каждой таблицы = 1 документ, с полями __op и __table)
 ```
 
 ```powershell
@@ -483,7 +489,7 @@ curl.exe -s http://localhost:8083/connectors/debezium-postgres-source/status | p
 | 4 | ES заполнен через CDC | 12 индексов `university.public.*`, `university.public.student/_count` → 3001 |
 | 5 | Redis заполнен через CDC | `KEYS student:*` → ~3000, тип HASH (HGETALL) |
 | 6 | Neo4j заполнен через CDC | Узлы + связи, `is_primary` на PART_OF |
-| 7 | MongoDB flat через CDC | ~138000 документов в `flat_data` |
+| 7 | MongoDB flat через CDC | ~10000 документов в `flat_data` (upsert по ключу, с __op/__table) |
 | 8 | MongoDB hierarchy (CdcHandler) | 2 вложенных документа в `hierarchy` |
 | 9 | INSERT в PG → MongoDB обновляется | Новый институт в иерархии + flat |
 | 10 | UPDATE в PG → MongoDB обновляется | Имя изменилось в иерархии + flat |

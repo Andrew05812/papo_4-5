@@ -1,5 +1,5 @@
 """
-Модуль app.py — тонкий FastAPI-фасад для сервиса генерации тестовых данных.
+Модуль app.py — тонкий FastAPI-фасад для сервиса генерации тестовых данных. 
 
 Генератор заполняет ТОЛЬКО PostgreSQL (остальные БД заполняются через CDC:
 Debezium → Kafka → Sink Connectors → ES/Neo4j/Redis/MongoDB).
