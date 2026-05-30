@@ -51,13 +51,10 @@ RUN mkdir -p /usr/share/confluent-hub-components/mongodb-kafka-connect-mongodb/l
     rm -f /tmp/mongodb-connector.jar
 
 # --- 5. ElasticSearch Sink Connector (Lenses elastic7 10.0.5) + ElasticsearchCdcHandler ---
-COPY es-connector.zip /tmp/es-connector.zip
-RUN mkdir -p /usr/share/confluent-hub-components/kafka-connect-elastic7-10.0.5 && \
-    mkdir -p /tmp/es-extracted && \
-    cd /tmp/es-extracted && \
-    jar xf /tmp/es-connector.zip && \
-    cp -r /tmp/es-extracted/kafka-connect-elastic7-10.0.5/* /usr/share/confluent-hub-components/kafka-connect-elastic7-10.0.5/ && \
-    rm -rf /tmp/es-extracted /tmp/es-connector.zip
+COPY es-connector.jar /tmp/es-connector.jar
+RUN mkdir -p /usr/share/confluent-hub-components/kafka-connect-elastic7-10.0.5/lib && \
+    cp /tmp/es-connector.jar /usr/share/confluent-hub-components/kafka-connect-elastic7-10.0.5/lib/ && \
+    rm -f /tmp/es-connector.jar
 COPY elasticsearch-cdc-handler.jar /usr/share/confluent-hub-components/kafka-connect-elastic7-10.0.5/
 
 USER appuser

@@ -30,8 +30,12 @@ module-info.class
 !kafka-connect/redis-cdc-handler.jar
 !kafka-connect/elasticsearch-cdc-handler.jar
 !kafka-connect/mongodb-connector.jar
+!kafka-connect/es-connector.jar
 *.tar.gz
+!kafka-connect/debezium-plugin.tar.gz
 *.zip
+!kafka-connect/redis-connector.zip
+!kafka-connect/neo4j-connect.zip
 data/
 INSTRUCTIONS.md
 Схемы/
