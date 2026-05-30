@@ -50,12 +50,7 @@ public class ElasticsearchCdcHandler<R extends ConnectRecord<R>> implements Tran
     }
 
     private String extractIndexName(String topic) {
-        if (topic == null) return null;
-        int lastDot = topic.lastIndexOf('.');
-        if (lastDot >= 0 && lastDot < topic.length() - 1) {
-            return "pg_" + topic.substring(lastDot + 1);
-        }
-        return "pg_" + topic;
+        return topic;
     }
 
     private String extractIdFromKey(Object key) {

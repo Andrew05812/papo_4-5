@@ -98,7 +98,7 @@ docker exec postgres psql -U postgres -d university -c "\dt"
 
 ### 2.3 PUBLICATION pub для всех таблиц
 ```powershell
-docker exec postgres psql -U postgres -d university -c "SELECT * FROM pg_publication"
+docker exec postgres psql -U postgres -d university -c "SELECT * FROM university.public.publication"
 ```
 Должно быть: pubname=**pub**, puballtables=**t** (все таблицы)
 
@@ -167,11 +167,11 @@ curl.exe -s http://localhost:8083/connectors/elasticsearch-sink/config | python 
 ```
 Должно быть: **12 topics**, cdcDelete transform=**ElasticsearchCdcHandler** (Lenses elastic7 не имеет behavior.on.null.values, DELETE реализован через кастомный Transform)
 
-### 4.3 12 индексов pg_* в ElasticSearch
+### 4.3 12 индексов university.public.* в ElasticSearch
 ```powershell
-curl.exe -s http://localhost:9200/_cat/indices?v | Select-String "pg_"
+curl.exe -s http://localhost:9200/_cat/indices?v | Select-String "university.public."
 ```
-12 индексов: pg_university, pg_institute, pg_department, pg_speciality, pg_department_specialities, pg_lecture_course, pg_lecture, pg_lecture_material, pg_student_group, pg_student, pg_schedule, pg_attendance
+12 индексов: university.public.university, university.public.institute, university.public.department, university.public.speciality, university.public.department_specialities, university.public.lecture_course, university.public.lecture, university.public.lecture_material, university.public.student_group, university.public.student, university.public.schedule, university.public.attendance
 
 ### 4.4 CRUD — Create (INSERT в Postgres → появляется в ES)
 ```powershell
@@ -180,7 +180,7 @@ docker exec postgres psql -U postgres -d university -c "INSERT INTO institute (i
 # Ждём 10 сек пока CDC дойдет:
 Start-Sleep 10
 # Проверяем в ES:
-curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
+curl.exe -s "http://localhost:9200/university.public.institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
 ```
 Должно быть: hits: **1**
 
@@ -188,7 +188,7 @@ curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | pyth
 ```powershell
 docker exec postgres psql -U postgres -d university -c "UPDATE institute SET name='ES_UPDATED' WHERE short_name='ETI'"
 Start-Sleep 10
-curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); h=d['hits']['hits']; print('name:', h[0]['_source']['name'] if len(h)>0 else 'NOT FOUND')"
+curl.exe -s "http://localhost:9200/university.public.institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); h=d['hits']['hits']; print('name:', h[0]['_source']['name'] if len(h)>0 else 'NOT FOUND')"
 ```
 Должно быть: name: **ES_UPDATED**
 
@@ -196,7 +196,7 @@ curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | pyth
 ```powershell
 docker exec postgres psql -U postgres -d university -c "DELETE FROM institute WHERE short_name='ETI'"
 Start-Sleep 10
-curl.exe -s "http://localhost:9200/pg_institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
+curl.exe -s "http://localhost:9200/university.public.institute/_search?q=short_name:ETI" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
 ```
 Должно быть: hits: **0** (документ физически удалён)
 
@@ -512,12 +512,12 @@ curl.exe -s "http://localhost:8000/hours/report?group_name=Group-001" -H "Author
 | # | Что показать | Команда-шорткат |
 |---|-------------|----------------|
 | 1 | wal2json установлен | `docker exec postgres bash -c "dpkg -l \| grep wal2json"` |
-| 2 | PUBLICATION pub FOR ALL TABLES | `docker exec postgres psql -U postgres -d university -c "SELECT * FROM pg_publication"` |
+| 2 | PUBLICATION pub FOR ALL TABLES | `docker exec postgres psql -U postgres -d university -c "SELECT * FROM university.public.publication"` |
 | 3 | wal_level=logical | `docker exec postgres psql -U postgres -d university -c "SHOW wal_level"` |
 | 4 | 12 таблиц схемы | `docker exec postgres psql -U postgres -d university -c "\dt"` |
 | 5 | 12 Kafka топиков (1 на таблицу) | `docker exec broker kafka-topics --list --bootstrap-server broker:29092 \| grep university` |
 | 6 | 6 коннекторов RUNNING | `curl.exe -s http://localhost:8083/connectors` |
-| 7 | ES: 12 pg_* индексов + CRUD | `curl.exe -s http://localhost:9200/_cat/indices?v \| grep pg_` |
+| 7 | ES: 12 university.public.* индексов + CRUD | `curl.exe -s http://localhost:9200/_cat/indices?v \| grep university.public.` |
 | 8 | Redis: student:* + student_group:* (HSET hash) | `docker exec redis redis-cli HGETALL student:UUID` |
 | 9 | Neo4j: узлы + связи + НЕТ LectureMaterial | `docker exec neo4j cypher-shell -u neo4j -p password12345 "CALL db.labels()"` |
 | 10 | MongoDB flat: PostgresHandler | `curl.exe -s http://localhost:8083/connectors/mongodb-sink-flat/config` |

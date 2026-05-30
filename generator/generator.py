@@ -244,7 +244,7 @@ def get_pg_conn():
     )
 
 
-def generate_data(student_count=1000):
+def generate_data(student_count=3000):
     """
     Главная функция генерации. Поток:
     1. Очистка PostgreSQL (clear_postgres)

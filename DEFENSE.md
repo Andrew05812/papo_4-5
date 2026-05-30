@@ -119,15 +119,15 @@ docker exec postgres psql -U postgres -d university -c "SELECT count(*) FROM stu
 # ~3000 студентов
 ```
 
-### 3.2 ElasticSearch — 12 индексов pg_*
+### 3.2 ElasticSearch — 12 индексов university.public.*
 
 ```powershell
-curl.exe -s http://localhost:9200/_cat/indices?v | Select-String "pg_"
-# 12 индексов: pg_university, pg_institute, pg_department, pg_speciality, pg_department_specialities, pg_lecture_course, pg_lecture, pg_lecture_material, pg_student_group, pg_student, pg_schedule, pg_attendance
+curl.exe -s http://localhost:9200/_cat/indices?v | Select-String "university.public."
+# 12 индексов: university.public.university, university.public.institute, university.public.department, university.public.speciality, university.public.department_specialities, university.public.lecture_course, university.public.lecture, university.public.lecture_material, university.public.student_group, university.public.student, university.public.schedule, university.public.attendance
 ```
 
 ```powershell
-curl.exe -s http://localhost:9200/pg_student/_count
+curl.exe -s http://localhost:9200/university.public.student/_count
 # {"count":3001,...}
 ```
 
@@ -320,7 +320,7 @@ docker exec neo4j cypher-shell -u neo4j -p password12345 "MATCH (sp:Speciality)-
 $instId = (docker exec postgres psql -U postgres -d university -t -A -c "SELECT id FROM institute LIMIT 1")
 docker exec postgres psql -U postgres -d university -c "INSERT INTO department (id, name, short_name, institute_id, head) VALUES ('cccc1111-0000-0000-0000-000000000001', 'ES_TEST_DEPT', 'ETD', '$instId', 'Test Head')"
 Start-Sleep 10
-curl.exe -s "http://localhost:9200/pg_department/_search?q=short_name:ETD" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
+curl.exe -s "http://localhost:9200/university.public.department/_search?q=short_name:ETD" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
 # hits: 1
 ```
 
@@ -329,7 +329,7 @@ curl.exe -s "http://localhost:9200/pg_department/_search?q=short_name:ETD" | pyt
 ```powershell
 docker exec postgres psql -U postgres -d university -c "UPDATE department SET name='ES_UPDATED' WHERE short_name='ETD'"
 Start-Sleep 10
-curl.exe -s "http://localhost:9200/pg_department/_search?q=short_name:ETD" | python -c "import sys,json; d=json.load(sys.stdin); print('name:', d['hits']['hits'][0]['_source']['name'])"
+curl.exe -s "http://localhost:9200/university.public.department/_search?q=short_name:ETD" | python -c "import sys,json; d=json.load(sys.stdin); print('name:', d['hits']['hits'][0]['_source']['name'])"
 # name: ES_UPDATED
 ```
 
@@ -338,7 +338,7 @@ curl.exe -s "http://localhost:9200/pg_department/_search?q=short_name:ETD" | pyt
 ```powershell
 docker exec postgres psql -U postgres -d university -c "DELETE FROM department WHERE short_name='ETD'"
 Start-Sleep 10
-curl.exe -s "http://localhost:9200/pg_department/_search?q=short_name:ETD" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
+curl.exe -s "http://localhost:9200/university.public.department/_search?q=short_name:ETD" | python -c "import sys,json; d=json.load(sys.stdin); print('hits:', d['hits']['total']['value'])"
 # hits: 0 (физически удалён через ElasticsearchCdcHandler)
 ```
 
@@ -472,7 +472,7 @@ curl.exe -s http://localhost:8083/connectors/debezium-postgres-source/status | p
 | 1 | Пустой PG до генерации | `SELECT count(*) FROM university` → 0 |
 | 2 | Генерация данных | `POST /generate` → 2 университета, ~3000 студентов |
 | 3 | PG заполнен | 12 таблиц, `SELECT count(*) FROM university` → 2 |
-| 4 | ES заполнен через CDC | 12 индексов `pg_*`, `pg_student/_count` → 3001 |
+| 4 | ES заполнен через CDC | 12 индексов `university.public.*`, `university.public.student/_count` → 3001 |
 | 5 | Redis заполнен через CDC | `KEYS student:*` → ~3000, тип HASH (HGETALL) |
 | 6 | Neo4j заполнен через CDC | Узлы + связи, `is_primary` на PART_OF |
 | 7 | MongoDB flat через CDC | ~138000 документов в `flat_data` |
@@ -509,7 +509,7 @@ docker exec broker kafka-topics --list --bootstrap-server broker:29092 | Select-
 docker exec postgres psql -U postgres -d university -c "\dt"
 
 # ES → все индексы:
-curl.exe -s http://localhost:9200/_cat/indices?v | Select-String "pg_"
+curl.exe -s http://localhost:9200/_cat/indices?v | Select-String "university.public."
 
 # Redis → ключи:
 docker exec redis redis-cli KEYS "student:*" | Measure-Object -Line
