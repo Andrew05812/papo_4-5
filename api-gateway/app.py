@@ -310,7 +310,7 @@ async def generate_data(_=Depends(verify_token)):
     return await call_generator("POST", "/generate")
 
 
-# Проксирование запроса к генератору: очистка всех 5 хранилищ (PG, ES, Neo4j, Redis, MongoDB).
+# Проксирование запроса к генератору: очистка PostgreSQL (CDC удалит данные из остальных БД).
 # Требует авторизации — предотвращает случайную или несанкционированную очистку данных.
 @app.delete("/generator/clear")
 async def clear_data(_=Depends(verify_token)):
@@ -600,12 +600,12 @@ pre.raw-json{background:var(--bg);padding:12px;border-radius:6px;font-size:11px;
     <!-- GENERATOR -->
     <div class="card">
         <div class="card-header">
-            <h2>Генератор данных (заполняет все 5 БД напрямую)</h2>
+            <h2>Генератор данных (заполняет только PostgreSQL, CDC → остальные БД)</h2>
             <span id="gen-status" class="status-pill pill-empty">проверка...</span>
         </div>
         <div class="row">
             <button class="btn-green" onclick="generateData()">Сгенерировать данные</button>
-            <button class="btn-red" onclick="clearData()">Очистить все хранилища</button>
+            <button class="btn-red" onclick="clearData()">Очистить PostgreSQL (CDC удалит из остальных)</button>
             <button class="btn-gray" onclick="checkStatus()">Обновить статус</button>
         </div>
         <div id="gen-result" style="display:none"></div>
@@ -668,19 +668,13 @@ pre.raw-json{background:var(--bg);padding:12px;border-radius:6px;font-size:11px;
                     <div class="auth-step st-user"><div class="anum">A</div><div><div class="atxt">Пользователь отправляет запрос с user JWT</div><div class="adet">GET /schedule/capacity?semester=1&year=2025&equipment=... + Bearer token</div></div></div>
                     <div class="auth-step st-gw"><div class="anum">B</div><div><div class="atxt">Gateway проверяет user JWT, создаёт service JWT, mTLS к nginx</div></div></div>
                     <div class="auth-step st-nginx"><div class="anum">C</div><div><div class="atxt">Nginx проверяет client.crt, прокси в Lab2</div></div></div>
-                    <div class="auth-step st-lab"><div class="anum">D</div><div><div class="atxt">Lab2 проверяет service JWT, выполняет запрос к 4 БД</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">1</div><div><div class="atxt"><span class="badge badge-pg">PostgreSQL</span> Фильтрация лекций по семестру + оборудование, schedule по году, COUNT студентов</div><div class="adet">Batch ANY(%s::uuid[]), composite index (lecture_id, week_start_date)</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">2</div><div><div class="atxt"><span class="badge badge-neo">Neo4j</span> Обход графа: Lecture-[BELONGS_TO]->Course, Lecture<-[PART_OF]-Schedule<-[CONTAINS]-Group</div><div class="adet">Сужение множества групп для Redis (не все студенты, а только из Neo4j)</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">3</div><div><div class="atxt"><span class="badge badge-redis">Redis</span> Pipeline HGETALL student:{id} - только для групп из Neo4j</div><div class="adet">Batch 2000, fallback к PG при промахах, заполнение кэша</div></div></div>
-                    <div class="auth-step st-db"><div class="anum">4</div><div><div class="atxt"><span class="badge badge-mongo">MongoDB</span> findOne: University->Institutes->Departments->Specialities</div><div class="adet">O(1) чтение вложенного документа вместо 4 JOIN в PostgreSQL</div></div></div>
+                    <div class="auth-step st-lab"><div class="anum">D</div><div><div class="atxt">Lab2 проверяет service JWT, выполняет Cypher-запрос к Neo4j</div></div></div>
+                    <div class="auth-step st-db"><div class="anum">1</div><div><div class="atxt"><span class="badge badge-neo">Neo4j</span> Один Cypher-запрос: фильтрация по семестру/оборудованию + обход графа + агрегация + иерархия</div><div class="adet">Lecture→Course→Schedule→Group→Student (collect/size вместо Redis), Course→Speciality→Dept→Inst→Univ (вместо MongoDB)</div></div></div>
                 </div>
             </div>
             <div class="arch-row" style="margin:6px 0">
                 <span class="badge badge-mtls">mTLS</span><span class="arch-arrow">&#10145;</span>
-                <span class="badge badge-pg">PG</span><span class="arch-arrow">&#10145;</span>
-                <span class="badge badge-neo">Neo4j</span><span class="arch-arrow">&#10145;</span>
-                <span class="badge badge-redis">Redis</span><span class="arch-arrow">&#10145;</span>
-                <span class="badge badge-mongo">Mongo</span>
+                <span class="badge badge-neo">Neo4j</span>
             </div>
             <div class="row">
                 <label>Семестр</label><input id="lab2-semester" type="number" value="1" min="1" max="8" style="max-width:80px"/>
@@ -702,7 +696,7 @@ pre.raw-json{background:var(--bg);padding:12px;border-radius:6px;font-size:11px;
                     <div class="auth-step st-user"><div class="anum">A</div><div><div class="atxt">Пользователь отправляет запрос с user JWT</div><div class="adet">GET /hours/report?group_name=Группа-001 + Bearer token</div></div></div>
                     <div class="auth-step st-gw"><div class="anum">B</div><div><div class="atxt">Gateway проверяет user JWT, создаёт service JWT, mTLS к nginx</div></div></div>
                     <div class="auth-step st-nginx"><div class="anum">C</div><div><div class="atxt">Nginx проверяет client.crt, прокси в Lab3</div></div></div>
-                    <div class="auth-step st-lab"><div class="anum">D</div><div><div class="atxt">Lab3 проверяет service JWT, выполняет запрос к 3 БД</div></div></div>
+                    <div class="auth-step st-lab"><div class="anum">D</div><div><div class="atxt">Lab3 проверяет service JWT, выполняет запрос к 2 БД (Neo4j + PG)</div></div></div>
                     <div class="auth-step st-db"><div class="anum">1</div><div><div class="atxt"><span class="badge badge-neo">Neo4j</span> Обход графа: Student→Group→Schedule→Lecture→Course, фильтр по is_primary</div><div class="adet">Speciality-[PART_OF {is_primary:true}]->Department — профильные специальности кафедры, lecture_type=лекция. 1 стартовая нода Group, O(E)</div></div></div>
                     <div class="auth-step st-db"><div class="anum">2</div><div><div class="atxt"><span class="badge badge-pg">PostgreSQL</span> Batch attendance: is_present=TRUE</div><div class="adet">attended_hours = attended_count * 2 (1 лекция = 2 ак.ч.), ANY(%s::uuid[]) batch</div></div></div>
                 </div>
@@ -1054,7 +1048,7 @@ c4cont:`graph TB
             L1["Lab1 :8001<br/>ES-Neo4j-PG-Redis"]
             L2["Lab2 :8002<br/>Neo4j"]
             L3["Lab3 :8003<br/>Neo4j-PG"]
-            GEN["Генератор :8010<br/>Заполняет 5 БД"]
+            GEN["Генератор :8010<br/>Заполняет PG (CDC→остальные)"]
             CERT["Генератор сертификатов<br/>Alpine"]
         end
         subgraph DB["Базы данных"]
@@ -1104,23 +1098,15 @@ c4comp:`graph TB
     end
     subgraph LB2["Lab2"]
         L2A["Token Verifier"]
-        L2PG["PG Batch Query"]
-        L2N["Neo4j Traversal"]
-        L2R["Redis Pipeline"]
-        L2M["MongoDB Hierarchy"]
+        L2N["Neo4j Cypher<br/>Один запрос"]
     end
     subgraph LB3["Lab3"]
         L3A["Token Verifier"]
-        L3ES["ES Filter"]
-        L3N["Neo4j Traversal"]
+        L3N["Neo4j Traversal<br/>is_primary"]
         L3PG["PG Attendance"]
     end
     subgraph GNC["Генератор"]
         GPG["PG Writer<br/>12 таблиц"]
-        GES["ES Indexer"]
-        GNN["Neo4j Builder"]
-        GRR["Redis Writer"]
-        GMM["MongoDB Builder"]
     end
     U(["Пользователь"])
     U -->|"POST /auth/token"| AUTH
@@ -1132,12 +1118,8 @@ c4comp:`graph TB
     ROUTE --> L2A
     ROUTE --> L3A
     L1A --> L1ES --> L1N --> L1PG --> L1R
-    L2A --> L2PG --> L2N --> L2R --> L2M
-    L3A --> L3ES --> L3N --> L3PG
-    GPG --> GES
-    GPG --> GNN
-    GPG --> GRR
-    GPG --> GMM`,
+    L2A --> L2N
+    L3A --> L3N --> L3PG`,
 
 dfd0:`graph LR
     U["Пользователь"] -->|"JWT-токен, параметры отчёта"| S["Полиглотная система управления учебным процессом"]
@@ -1170,7 +1152,7 @@ dfd1:`graph TB
     RD -->|"student cache"| R1
     R2 -->|"Cypher: обход+иерархия"| N4
     N4 -->|"lectures+groups+hierarchy"| R2
-    R3 -->|"обход графа+теги"| N4
+    R3 -->|"обход графа+is_primary"| N4
     N4 -->|"student/schedule/hours"| R3
     R3 -->|"is_present attendance"| PG
     PG -->|"attendance stats"| R3
